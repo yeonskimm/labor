@@ -264,6 +264,163 @@ const Row=({k,v})=>(
   <tr><td style={{...TD,background:"#f8f8f8",fontWeight:"bold",width:"22%",whiteSpace:"nowrap"}}>{k}</td>
   <td style={TD}>{v}</td></tr>
 );
+
+// ── 천단위 콤마 헬퍼 ──
+const onlyDigits = s => String(s==null?'':s).replace(/[^0-9]/g,'');
+const withCommas = s => { const d=onlyDigits(s); return d?Number(d).toLocaleString():''; };
+
+// 금액 입력 — 입력 즉시 3자리마다 콤마. 내부 state는 숫자 문자열(콤마 없음)로 저장
+function MoneyInput({style, value, onChange, placeholder}){
+  // value: 콤마 없는 숫자 문자열 / 화면엔 콤마 붙여 표시
+  return(
+    <input
+      type="tel"
+      inputMode="numeric"
+      placeholder={placeholder}
+      value={value?Number(value).toLocaleString():''}
+      onChange={e=>onChange(onlyDigits(e.target.value))}
+      style={style}
+    />
+  );
+}
+
+// ── 커스텀 날짜 선택기 (달력에서 날짜 누르면 즉시 선택) ──
+const MONTHS_KO=['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
+const WEEK_KO=['일','월','화','수','목','금','토'];
+function DateInput({style, value, onChange, label}){
+  const [open,setOpen]=useState(false);
+  const today=new Date();
+  const sel = value?new Date(value+'T00:00:00'):null;
+  const [viewY,setViewY]=useState((sel||today).getFullYear());
+  const [viewM,setViewM]=useState((sel||today).getMonth());
+
+  const pick=(y,m,d)=>{
+    const mm=String(m+1).padStart(2,'0');
+    const dd=String(d).padStart(2,'0');
+    onChange({target:{value:`${y}-${mm}-${dd}`}});
+    setOpen(false);
+  };
+
+  // 달력 그리드 계산
+  const firstDay=new Date(viewY,viewM,1).getDay();
+  const daysInMonth=new Date(viewY,viewM+1,0).getDate();
+  const cells=[];
+  for(let i=0;i<firstDay;i++) cells.push(null);
+  for(let d=1;d<=daysInMonth;d++) cells.push(d);
+
+  const isSel=(d)=>sel&&sel.getFullYear()===viewY&&sel.getMonth()===viewM&&sel.getDate()===d;
+  const isToday=(d)=>today.getFullYear()===viewY&&today.getMonth()===viewM&&today.getDate()===d;
+
+  const prevMonth=()=>{ if(viewM===0){setViewM(11);setViewY(y=>y-1);}else setViewM(m=>m-1); };
+  const nextMonth=()=>{ if(viewM===11){setViewM(0);setViewY(y=>y+1);}else setViewM(m=>m+1); };
+
+  const dispText = value ? `${sel.getFullYear()}. ${sel.getMonth()+1}. ${sel.getDate()}` : (label||'날짜 선택');
+
+  return(
+    <div style={{position:'relative'}}>
+      {/* 표시 버튼 */}
+      <button type="button" onClick={()=>setOpen(o=>!o)}
+        style={{...style, textAlign:'left', cursor:'pointer',
+          color: value?'#fff':'#8890a4', minHeight:38,
+          display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+        <span>{dispText}</span>
+        <span style={{fontSize:13,opacity:.7}}>📅</span>
+      </button>
+      {open&&(
+        <>
+          {/* 바깥 클릭 닫기 */}
+          <div onClick={()=>setOpen(false)} style={{position:'fixed',inset:0,zIndex:90}}/>
+          <div style={{position:'absolute',top:'calc(100% + 4px)',left:0,zIndex:91,
+            background:'#141920',border:'1px solid #2a3142',borderRadius:12,
+            padding:'10px 12px',boxShadow:'0 12px 40px rgba(0,0,0,0.6)',width:248}}>
+            {/* 연/월 네비 */}
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+              <button type="button" onClick={prevMonth}
+                style={{background:'#1a2030',border:'none',color:'#c9a84c',borderRadius:6,
+                  width:28,height:28,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>‹</button>
+              <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                <select value={viewY} onChange={e=>setViewY(+e.target.value)}
+                  style={{background:'#0b0e14',border:'1px solid #2a3142',color:'#fff',
+                    borderRadius:6,padding:'3px 6px',fontSize:12,fontFamily:'inherit',cursor:'pointer'}}>
+                  {Array.from({length:80},(_, i)=>today.getFullYear()-70+i).map(y=>
+                    <option key={y} value={y}>{y}년</option>)}
+                </select>
+                <select value={viewM} onChange={e=>setViewM(+e.target.value)}
+                  style={{background:'#0b0e14',border:'1px solid #2a3142',color:'#fff',
+                    borderRadius:6,padding:'3px 6px',fontSize:12,fontFamily:'inherit',cursor:'pointer'}}>
+                  {MONTHS_KO.map((mn,i)=><option key={i} value={i}>{mn}</option>)}
+                </select>
+              </div>
+              <button type="button" onClick={nextMonth}
+                style={{background:'#1a2030',border:'none',color:'#c9a84c',borderRadius:6,
+                  width:28,height:28,cursor:'pointer',fontSize:14,fontFamily:'inherit'}}>›</button>
+            </div>
+            {/* 요일 */}
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:2,marginBottom:3}}>
+              {WEEK_KO.map((w,i)=>(
+                <div key={w} style={{textAlign:'center',fontSize:10,fontWeight:700,
+                  color:i===0?'#d95050':i===6?'#6b8fd9':'#8890a4',padding:'2px 0'}}>{w}</div>
+              ))}
+            </div>
+            {/* 날짜 그리드 */}
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:2}}>
+              {cells.map((d,i)=>(
+                <div key={i} style={{aspectRatio:'1'}}>
+                  {d&&(
+                    <button type="button" onClick={()=>pick(viewY,viewM,d)}
+                      style={{width:'100%',height:'100%',minHeight:28,border:'none',cursor:'pointer',
+                        borderRadius:6,fontFamily:'inherit',fontSize:12,fontWeight:isSel(d)?800:500,
+                        background:isSel(d)?'linear-gradient(135deg,#c9a84c,#a87028)':isToday(d)?'rgba(201,168,76,0.12)':'transparent',
+                        color:isSel(d)?'#07090d':(i%7===0?'#d95050':i%7===6?'#6b8fd9':'#eaecf4')}}>
+                      {d}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {/* 오늘 / 지우기 */}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              <button type="button" onClick={()=>{const t=new Date();pick(t.getFullYear(),t.getMonth(),t.getDate());}}
+                style={{flex:1,background:'#1a2030',border:'none',color:'#c9a84c',borderRadius:6,
+                  padding:'5px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}}>오늘</button>
+              <button type="button" onClick={()=>{onChange({target:{value:''}});setOpen(false);}}
+                style={{flex:1,background:'#1a2030',border:'none',color:'#8890a4',borderRadius:6,
+                  padding:'5px',fontSize:11,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}}>지우기</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// 퇴직금 계산기 공용 컴포넌트 (함수 밖에 정의 → 리렌더 시 input 포커스 유지)
+const RetFieldRow=({label,children})=>(
+  <div style={{marginBottom:10}}>
+    <label style={{fontSize:11,fontWeight:700,color:C.txt2,display:'block',marginBottom:4}}>{label}</label>
+    {children}
+  </div>
+);
+const RetInfoBox=({text})=>(
+  <div style={{background:'rgba(139,110,224,0.07)',border:'1px solid rgba(139,110,224,0.2)',
+    borderRadius:9,padding:'10px 12px',fontSize:11,color:'#8890a4',lineHeight:1.7,marginBottom:12,whiteSpace:'pre-line'}}>
+    {text}
+  </div>
+);
+const RetResultBox=({label,amount,sub,color})=>(
+  <div style={{background:'rgba(201,168,76,0.06)',border:'1.5px solid rgba(201,168,76,0.3)',
+    borderRadius:14,padding:'14px 16px',marginTop:12}}>
+    <div style={{fontSize:11,color:'#414a5c',marginBottom:3}}>{label}</div>
+    <div style={{fontSize:26,fontWeight:900,
+      background:`linear-gradient(135deg,${color||'#f5dc80'},#c9a84c)`,
+      WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',letterSpacing:'-0.5px'}}>
+      {Math.round(amount||0).toLocaleString()} <span style={{fontSize:15}}>원</span>
+    </div>
+    {sub&&<div style={{fontSize:11,color:'#414a5c',marginTop:3}}>{sub}</div>}
+  </div>
+);
+
 const Sign=({f})=>(
   <div style={{marginTop:14,fontSize:"9pt"}}>
     <div style={{textAlign:"right"}}>{f.signDate||"　　　년　　월　　일"}</div>
@@ -287,22 +444,24 @@ function PrevStd({f}){
       <table style={{width:"100%",borderCollapse:"collapse",marginBottom:6}}>
         <tbody>
           <Row k="1. 근로계약기간" v={fixed?`${d2(f.startDate)} ~ ${d2(f.endDate)}`:`${d2(f.startDate)}부터 （기간의 정함이 없음）`}/>
-          <Row k="2. 근무장소" v={fill(f.place)}/>
-          <Row k="3. 업무내용" v={fill(f.job)}/>
-          <Row k="4. 소정근로시간" v={`${f.timeIn||"　　"}시 ~ ${f.timeOut||"　　"}시 （휴게 ${f.breakIn||"　　"}시~${f.breakOut||"　　"}시）`}/>
-          <Row k="5. 근무일/휴일" v={`매주 ${fill(f.workDays,"　")} 근무 / 주휴일: 매주 ${fill(f.holiday,"　")}`}/>
-          <Row k="6. 임금" v={
+          <Row k="2. 사업장 주소" v={fill(f.bizAddr)}/>
+          <Row k="3. 근무장소" v={fill(f.place)}/>
+          <Row k="4. 업무내용" v={fill(f.job)}/>
+          <Row k="5. 소정근로시간" v={`${f.timeIn||"　　"}시 ~ ${f.timeOut||"　　"}시 （휴게 ${f.breakIn||"　　"}시~${f.breakOut||"　　"}시）`}/>
+          <Row k="6. 근무일/휴일" v={`매주 ${fill(f.workDays,"　")} 근무 / 주휴일: 매주 ${fill(f.holiday,"　")}`}/>
+          <Row k="7. 임금" v={
             <div>
-              <div>- 월（일·시간）급: {fill(f.wage,"　　　　　")}원 / 지급일: 매월 {fill(f.payDay,"　")}일</div>
-              <div>- 지급방법: {f.payMethod==="account"?"근로자 명의 예금통장 입금":"직접 지급"}</div>
-              {f.bonus&&<div>- 상여금: {f.bonus}원</div>}
+              <div>- 기본급: {fill(f.basePay,"　　　　")}원</div>
+              {f.allowance&&<div>- 제수당: {f.allowance}원 （{fill(f.allowanceNote,"내용 기재")}）</div>}
+              <div>- 임금계산: 시간급 기준, 소정근로시간 × 시급</div>
+              <div>- 지급일: 매월 {fill(f.payDay,"　")}일 / {f.payMethod==="account"?"근로자 명의 예금통장 입금":"직접 지급"}</div>
             </div>
           }/>
-          <Row k="7. 연차유급휴가" v="근로기준법에서 정하는 바에 따라 부여"/>
-          <Row k="8. 사회보험" v="☑ 고용보험  ☑ 산재보험  ☑ 국민연금  ☑ 건강보험"/>
+          <Row k="8. 연차유급휴가" v="근로기준법에서 정하는 바에 따라 부여"/>
+          <Row k="9. 사회보험" v="☑ 고용보험  ☑ 산재보험  ☑ 국민연금  ☑ 건강보험"/>
         </tbody>
       </table>
-      <p style={{fontSize:"8.5pt"}}>9. 이 계약에 정함이 없는 사항은 근로기준법령에 의함</p>
+      <p style={{fontSize:"8.5pt"}}>10. 이 계약에 정함이 없는 사항은 근로기준법령에 의함</p>
       <Sign f={f}/>
     </div>
   );
@@ -334,8 +493,10 @@ function PrevPart({f}){
       <table style={{width:"100%",borderCollapse:"collapse",marginBottom:6}}>
         <tbody>
           <Row k="5. 임금" v={<div>
-            <div>- 시간（일·월）급: {fill(f.wage,"　　　　")}원</div>
+            <div>- 기본급: {fill(f.basePay,"　　　　")}원 （시간（일·월）급）</div>
+            {f.allowance&&<div>- 제수당: {f.allowance}원 （{fill(f.allowanceNote,"내용 기재")}）</div>}
             <div>- 초과근로 가산임금률: {fill(f.overRate,"　　")}%</div>
+            <div>- 임금계산방법: 시간급 기준, 실근무시간 × 시급</div>
             <div>- 임금지급일: 매월（매주） {fill(f.payDay,"　")}일 / {f.payMethod==="account"?"통장입금":"직접지급"}</div>
           </div>}/>
           <Row k="6. 연차유급휴가" v="통상근로자 근로시간에 비례 부여"/>
@@ -393,9 +554,13 @@ function PrevMinor({f}){
           <Row k="1. 근로개시일" v={`${d2(f.startDate)}부터${f.endDate?` ~ ${d2(f.endDate)}`:""}`}/>
           <Row k="2. 근무장소" v={fill(f.place)}/>
           <Row k="3. 업무내용" v={fill(f.job)}/>
-          <Row k="4. 소정근로시간" v={`${f.timeIn||"　　"}시 ~ ${f.timeOut||"　　"}시 （휴게 ${f.breakIn||"　"}~${f.breakOut||"　"}）`}/>
+          <Row k="4. 소정근로시간" v={`${f.timeIn||"　　"}시 ~ ${f.timeOut||"　　"}시 （휴게 ${f.breakIn||"　　"}시~${f.breakOut||"　　"}시, 1일 7시간·주 35시간 한도）`}/>
           <Row k="5. 근무일/휴일" v={`매주 ${fill(f.workDays,"　")} 근무 / 주휴일: ${fill(f.holiday,"　")}`}/>
-          <Row k="6. 임금" v={`- 월（일·시간）급: ${fill(f.wage,"　　　　")}원 / 지급일: 매월 ${fill(f.payDay,"　")}일`}/>
+          <Row k="6. 임금" v={<div>
+            <div>- 기본급: {fill(f.basePay,"　　　　")}원</div>
+            {f.allowance&&<div>- 제수당: {f.allowance}원（{fill(f.allowanceNote,"내용")}）</div>}
+            <div>- 지급일: 매월 {fill(f.payDay,"　")}일 / {f.payMethod==="account"?"예금통장 입금":"직접 지급"}</div>
+          </div>}/>
           <Row k="7. 연차유급휴가" v="근로기준법에서 정하는 바에 따라 부여"/>
           <Row k="8. 동의서" v={`가족관계증명서: ${f.consentReady==="yes"?"제출":"미제출"} / 친권자 동의서 구비`}/>
           <Row k="9. 사회보험" v="☑ 고용보험  ☑ 산재보험  ☑ 국민연금  ☑ 건강보험"/>
@@ -454,9 +619,10 @@ function ContractInputStd({f,u}){
     </div>
     <div style={R2}>
       <FLD label="근로자 성명"><input style={INP} value={f.worker||""} onChange={e=>u("worker",e.target.value)}/></FLD>
-      <FLD label="근로개시일"><input style={INP} type="date" value={f.startDate||""} onChange={e=>u("startDate",e.target.value)}/></FLD>
+      <FLD label="근로개시일"><DateInput style={INP} value={f.startDate||""} onChange={e=>u("startDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
-    {f.period==="fixed"&&<FLD label="계약종료일"><input style={INP} type="date" value={f.endDate||""} onChange={e=>u("endDate",e.target.value)}/></FLD>}
+    {f.period==="fixed"&&<FLD label="계약종료일"><DateInput style={INP} value={f.endDate||""} onChange={e=>u("endDate",e.target.value)} label="날짜 선택"/></FLD>}
+    <FLD label="사업장 주소"><input style={INP} value={f.bizAddr||""} onChange={e=>u("bizAddr",e.target.value)}/></FLD>
     <FLD label="근무장소"><input style={INP} value={f.place||""} onChange={e=>u("place",e.target.value)}/></FLD>
     <FLD label="업무내용"><input style={INP} value={f.job||""} onChange={e=>u("job",e.target.value)}/></FLD>
     <div style={R2}>
@@ -472,15 +638,17 @@ function ContractInputStd({f,u}){
       <FLD label="주휴일"><input style={INP} placeholder="예) 일요일" value={f.holiday||""} onChange={e=>u("holiday",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="임금(원)"><input style={INP} type="number" value={f.wage||""} onChange={e=>u("wage",e.target.value)}/></FLD>
-      <FLD label="임금지급일(매월 __일)"><input style={INP} placeholder="25" value={f.payDay||""} onChange={e=>u("payDay",e.target.value)}/></FLD>
+      <FLD label="기본급(원)"><MoneyInput style={INP} placeholder="기본급" value={f.basePay||""} onChange={v=>u("basePay",v)}/></FLD>
+      <FLD label="제수당(원, 있으면)"><MoneyInput style={INP} placeholder="0" value={f.allowance||""} onChange={v=>u("allowance",v)}/></FLD>
     </div>
+    {(f.allowance)&&<FLD label="수당 내용"><input style={INP} placeholder="예) 식비 10만, 교통비 5만" value={f.allowanceNote||""} onChange={e=>u("allowanceNote",e.target.value)}/></FLD>}
     <div style={R2}>
+      <FLD label="임금지급일(매월 __일)"><input style={INP} placeholder="25" value={f.payDay||""} onChange={e=>u("payDay",e.target.value)}/></FLD>
       <FLD label="지급방법"><select style={SEL} value={f.payMethod||"account"} onChange={e=>u("payMethod",e.target.value)}>
         <option value="account">예금통장 입금</option><option value="direct">직접 지급</option>
       </select></FLD>
-      <FLD label="작성일"><input style={INP} type="date" value={f.signDate||""} onChange={e=>u("signDate",e.target.value)}/></FLD>
     </div>
+    <FLD label="작성일"><DateInput style={INP} value={f.signDate||""} onChange={e=>u("signDate",e.target.value)} label="날짜 선택"/></FLD>
   </>);
 }
 
@@ -491,8 +659,8 @@ function ContractInputPart({f,u}){
       <FLD label="근로자 성명"><input style={INP} value={f.worker||""} onChange={e=>u("worker",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="근로개시일"><input style={INP} type="date" value={f.startDate||""} onChange={e=>u("startDate",e.target.value)}/></FLD>
-      <FLD label="종료일(없으면 공란)"><input style={INP} type="date" value={f.endDate||""} onChange={e=>u("endDate",e.target.value)}/></FLD>
+      <FLD label="근로개시일"><DateInput style={INP} value={f.startDate||""} onChange={e=>u("startDate",e.target.value)} label="날짜 선택"/></FLD>
+      <FLD label="종료일(없으면 공란)"><DateInput style={INP} value={f.endDate||""} onChange={e=>u("endDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
     <div style={R2}>
       <FLD label="근무장소"><input style={INP} value={f.place||""} onChange={e=>u("place",e.target.value)}/></FLD>
@@ -515,16 +683,20 @@ function ContractInputPart({f,u}){
       </div>
     ))}
     <div style={R2}>
-      <FLD label="시급(원)"><input style={INP} type="number" value={f.wage||""} onChange={e=>u("wage",e.target.value)}/></FLD>
+      <FLD label="기본급(시급·원)"><MoneyInput style={INP} placeholder="기본급" value={f.basePay||""} onChange={v=>u("basePay",v)}/></FLD>
+      <FLD label="제수당(원, 있으면)"><MoneyInput style={INP} placeholder="0" value={f.allowance||""} onChange={v=>u("allowance",v)}/></FLD>
+    </div>
+    {(f.allowance)&&<FLD label="수당 내용"><input style={INP} placeholder="예) 식비, 교통비" value={f.allowanceNote||""} onChange={e=>u("allowanceNote",e.target.value)}/></FLD>}
+    <div style={R2}>
+      <FLD label="초과근로 가산율(%)"><input style={INP} placeholder="50" value={f.overRate||""} onChange={e=>u("overRate",e.target.value)}/></FLD>
       <FLD label="임금지급일"><input style={INP} placeholder="25" value={f.payDay||""} onChange={e=>u("payDay",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="초과근로 가산율(%)"><input style={INP} placeholder="50" value={f.overRate||""} onChange={e=>u("overRate",e.target.value)}/></FLD>
       <FLD label="지급방법"><select style={SEL} value={f.payMethod||"account"} onChange={e=>u("payMethod",e.target.value)}>
         <option value="account">예금통장</option><option value="direct">직접지급</option>
       </select></FLD>
+      <FLD label="작성일"><DateInput style={INP} value={f.signDate||""} onChange={e=>u("signDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
-    <FLD label="작성일"><input style={INP} type="date" value={f.signDate||""} onChange={e=>u("signDate",e.target.value)}/></FLD>
   </>);
 }
 
@@ -535,8 +707,8 @@ function ContractInputConst({f,u}){
       <FLD label="근로자 성명"><input style={INP} value={f.worker||""} onChange={e=>u("worker",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="근로개시일"><input style={INP} type="date" value={f.startDate||""} onChange={e=>u("startDate",e.target.value)}/></FLD>
-      <FLD label="근로종료일"><input style={INP} type="date" value={f.endDate||""} onChange={e=>u("endDate",e.target.value)}/></FLD>
+      <FLD label="근로개시일"><DateInput style={INP} value={f.startDate||""} onChange={e=>u("startDate",e.target.value)} label="날짜 선택"/></FLD>
+      <FLD label="근로종료일"><DateInput style={INP} value={f.endDate||""} onChange={e=>u("endDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
     <FLD label="근무장소"><input style={INP} value={f.place||""} onChange={e=>u("place",e.target.value)}/></FLD>
     <FLD label="업무내용(직종)"><input style={INP} value={f.job||""} onChange={e=>u("job",e.target.value)}/></FLD>
@@ -553,18 +725,18 @@ function ContractInputConst({f,u}){
       <FLD label="주휴일"><input style={INP} placeholder="예) 일" value={f.holiday||""} onChange={e=>u("holiday",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="일급(원)"><input style={INP} type="number" value={f.wage||""} onChange={e=>u("wage",e.target.value)}/></FLD>
+      <FLD label="일급(원)"><MoneyInput style={INP} value={f.wage||""} onChange={v=>u("wage",v)}/></FLD>
       <FLD label="임금지급일"><input style={INP} placeholder="25" value={f.payDay||""} onChange={e=>u("payDay",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="시간외수당(원)"><input style={INP} type="number" value={f.otWage||""} onChange={e=>u("otWage",e.target.value)}/></FLD>
-      <FLD label="야간수당(원)"><input style={INP} type="number" value={f.nightWage||""} onChange={e=>u("nightWage",e.target.value)}/></FLD>
+      <FLD label="시간외수당(원)"><MoneyInput style={INP} value={f.otWage||""} onChange={v=>u("otWage",v)}/></FLD>
+      <FLD label="야간수당(원)"><MoneyInput style={INP} value={f.nightWage||""} onChange={v=>u("nightWage",v)}/></FLD>
     </div>
     <div style={R2}>
       <FLD label="지급방법"><select style={SEL} value={f.payMethod||"account"} onChange={e=>u("payMethod",e.target.value)}>
         <option value="account">예금통장</option><option value="direct">직접지급</option>
       </select></FLD>
-      <FLD label="작성일"><input style={INP} type="date" value={f.signDate||""} onChange={e=>u("signDate",e.target.value)}/></FLD>
+      <FLD label="작성일"><DateInput style={INP} value={f.signDate||""} onChange={e=>u("signDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
   </>);
 }
@@ -581,7 +753,7 @@ function ContractInputMinor({f,u}){
     </div>
     <div style={R2}>
       <FLD label="나이(만)"><input style={INP} placeholder="17" value={f.workerAge||""} onChange={e=>u("workerAge",e.target.value)}/></FLD>
-      <FLD label="근로개시일"><input style={INP} type="date" value={f.startDate||""} onChange={e=>u("startDate",e.target.value)}/></FLD>
+      <FLD label="근로개시일"><DateInput style={INP} value={f.startDate||""} onChange={e=>u("startDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
     <div style={R2}>
       <FLD label="근무장소"><input style={INP} value={f.place||""} onChange={e=>u("place",e.target.value)}/></FLD>
@@ -596,8 +768,19 @@ function ContractInputMinor({f,u}){
       <FLD label="주휴일"><input style={INP} value={f.holiday||""} onChange={e=>u("holiday",e.target.value)}/></FLD>
     </div>
     <div style={R2}>
-      <FLD label="임금(원)"><input style={INP} type="number" value={f.wage||""} onChange={e=>u("wage",e.target.value)}/></FLD>
+      <FLD label="휴게 시작"><input style={INP} type="time" value={f.breakIn||"12:00"} onChange={e=>u("breakIn",e.target.value)}/></FLD>
+      <FLD label="휴게 종료"><input style={INP} type="time" value={f.breakOut||"13:00"} onChange={e=>u("breakOut",e.target.value)}/></FLD>
+    </div>
+    <div style={R2}>
+      <FLD label="기본급(원)"><MoneyInput style={INP} placeholder="기본급" value={f.basePay||""} onChange={v=>u("basePay",v)}/></FLD>
+      <FLD label="제수당(원, 있으면)"><MoneyInput style={INP} placeholder="0" value={f.allowance||""} onChange={v=>u("allowance",v)}/></FLD>
+    </div>
+    {(f.allowance)&&<FLD label="수당 내용"><input style={INP} placeholder="예) 식비, 교통비" value={f.allowanceNote||""} onChange={e=>u("allowanceNote",e.target.value)}/></FLD>}
+    <div style={R2}>
       <FLD label="임금지급일"><input style={INP} placeholder="25" value={f.payDay||""} onChange={e=>u("payDay",e.target.value)}/></FLD>
+      <FLD label="지급방법"><select style={SEL} value={f.payMethod||"account"} onChange={e=>u("payMethod",e.target.value)}>
+        <option value="account">예금통장 입금</option><option value="direct">직접 지급</option>
+      </select></FLD>
     </div>
     <div style={{fontWeight:700,fontSize:12,color:C.goldL,margin:"10px 0 6px"}}>👪 친권자(후견인)</div>
     <div style={R2}>
@@ -608,7 +791,7 @@ function ContractInputMinor({f,u}){
       <FLD label="가족관계증명서"><select style={SEL} value={f.consentReady||"no"} onChange={e=>u("consentReady",e.target.value)}>
         <option value="no">미제출</option><option value="yes">제출 완료</option>
       </select></FLD>
-      <FLD label="작성일"><input style={INP} type="date" value={f.signDate||""} onChange={e=>u("signDate",e.target.value)}/></FLD>
+      <FLD label="작성일"><DateInput style={INP} value={f.signDate||""} onChange={e=>u("signDate",e.target.value)} label="날짜 선택"/></FLD>
     </div>
   </>);
 }
@@ -1112,6 +1295,732 @@ const ST_LABEL={apply:"적용",cond:"조건부",na:"미적용"};
 const IND_LABEL={manu:"제조업",const:"건설업",retail:"도소매·음식·숙박",transport:"운수·창고",service:"기타 서비스·사무"};
 const TOG_LABEL2={youth:"18세 미만 연소근로자",preg:"임신·출산 근로자",foreign:"외국인근로자"};
 
+
+/* ═══════════════════════════════════════
+   임금명세서 (근로기준법 §48②, 시행령 §27의2)
+═══════════════════════════════════════ */
+function PayslipPreview({f,pRef}){
+  const won=n=>Math.round(n||0).toLocaleString();
+  const base=parseFloat(f.basePay)||0;
+  const allow=parseFloat(f.allowance)||0;
+  const ot=parseFloat(f.otPay)||0;
+  const night=parseFloat(f.nightPay)||0;
+  const holiday=parseFloat(f.holidayPay)||0;
+  const gross=base+allow+ot+night+holiday;
+  const emp=parseFloat(f.empIns)||0;
+  const indAcc=parseFloat(f.indAccIns)||0;
+  const pension=parseFloat(f.pension)||0;
+  const health=parseFloat(f.health)||0;
+  const longCare=parseFloat(f.longCare)||0;
+  const incomeTax=parseFloat(f.incomeTax)||0;
+  const localTax=parseFloat(f.localTax)||0;
+  const totalDeduct=emp+indAcc+pension+health+longCare+incomeTax+localTax;
+  const net=gross-totalDeduct;
+  return(
+    <div ref={pRef} style={{background:"#fff",color:"#000",
+      fontFamily:"'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',sans-serif",
+      fontSize:"9.5pt",lineHeight:1.6,padding:"12mm 14mm",width:794,minHeight:400,boxSizing:"border-box"}}>
+      <h2 style={{textAlign:"center",fontSize:"14pt",fontWeight:"bold",
+        borderBottom:"2px solid #000",paddingBottom:6,marginBottom:10}}>임 금 명 세 서</h2>
+      {/* 근로자 정보 */}
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:10,fontSize:"9pt"}}>
+        <tbody>
+          <tr>
+            <td style={{border:"1px solid #ccc",background:"#f0f0f0",fontWeight:"bold",padding:"4px 8px",width:"18%"}}>성명</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"32%"}}>{f.workerName||"　　　　　"}</td>
+            <td style={{border:"1px solid #ccc",background:"#f0f0f0",fontWeight:"bold",padding:"4px 8px",width:"18%"}}>생년월일</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"32%"}}>{f.workerBirth||"　　　　　"}</td>
+          </tr>
+          <tr>
+            <td style={{border:"1px solid #ccc",background:"#f0f0f0",fontWeight:"bold",padding:"4px 8px"}}>사업장명</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>{f.bizName||"　　　　　"}</td>
+            <td style={{border:"1px solid #ccc",background:"#f0f0f0",fontWeight:"bold",padding:"4px 8px"}}>임금 지급일</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>{f.payDate||"　　　　　"}</td>
+          </tr>
+          <tr>
+            <td style={{border:"1px solid #ccc",background:"#f0f0f0",fontWeight:"bold",padding:"4px 8px"}}>지급 대상기간</td>
+            <td colSpan={3} style={{border:"1px solid #ccc",padding:"4px 8px"}}>
+              {f.periodFrom||"　　　　"} ~ {f.periodTo||"　　　　"}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      {/* 지급 내역 */}
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:10,fontSize:"9pt"}}>
+        <thead>
+          <tr>
+            <td colSpan={4} style={{background:"#1a2030",color:"#e3c86e",fontWeight:"bold",
+              padding:"5px 8px",fontSize:"9.5pt",textAlign:"center",border:"1px solid #ccc"}}>
+              【 지 급 내 역 】
+            </td>
+          </tr>
+          <tr style={{background:"#f0f0f0",fontWeight:"bold"}}>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"25%"}}>항목</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"25%",textAlign:"right"}}>금액(원)</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"50%"}}>산출근거</td>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>① 기본급</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(base)}</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",fontSize:"8.5pt",color:"#444"}}>
+              {f.baseCalc||"시급 × 소정근로시간"}
+            </td>
+          </tr>
+          {allow>0&&<tr>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>② 제수당</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(allow)}</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",fontSize:"8.5pt",color:"#444"}}>
+              {f.allowanceNote||"각종 수당"}
+            </td>
+          </tr>}
+          {ot>0&&<tr>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>③ 연장근로수당</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(ot)}</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",fontSize:"8.5pt",color:"#444"}}>
+              {f.otCalc||`연장 ${f.otHours||0}h × 시급 × 1.5`}
+            </td>
+          </tr>}
+          {night>0&&<tr>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>④ 야간근로수당</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(night)}</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",fontSize:"8.5pt",color:"#444"}}>
+              {f.nightCalc||`야간 ${f.nightHours||0}h × 시급 × 0.5`}
+            </td>
+          </tr>}
+          {holiday>0&&<tr>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>⑤ 휴일근로수당</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(holiday)}</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",fontSize:"8.5pt",color:"#444"}}>
+              {f.holidayCalc||`휴일 ${f.holidayHours||0}h × 시급 × 1.5`}
+            </td>
+          </tr>}
+          <tr style={{background:"#fffde7",fontWeight:"bold"}}>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px"}}>지급 합계</td>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px",textAlign:"right",
+              fontSize:"10pt"}}>{won(gross)}</td>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px"}}></td>
+          </tr>
+        </tbody>
+      </table>
+      {/* 공제 내역 */}
+      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:10,fontSize:"9pt"}}>
+        <thead>
+          <tr>
+            <td colSpan={3} style={{background:"#2a1a1a",color:"#e88",fontWeight:"bold",
+              padding:"5px 8px",textAlign:"center",border:"1px solid #ccc"}}>
+              【 공 제 내 역 】
+            </td>
+          </tr>
+          <tr style={{background:"#f0f0f0",fontWeight:"bold"}}>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"34%"}}>항목</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"33%",textAlign:"right"}}>금액(원)</td>
+            <td style={{border:"1px solid #ccc",padding:"4px 8px",width:"33%"}}>비고</td>
+          </tr>
+        </thead>
+        <tbody>
+          {[[emp,"고용보험료"],[indAcc,"산재보험료"],[pension,"국민연금"],[health,"건강보험료"],[longCare,"장기요양보험료"],[incomeTax,"소득세"],[localTax,"지방소득세"]].map(([v,k])=>v>0&&(
+            <tr key={k}>
+              <td style={{border:"1px solid #ccc",padding:"4px 8px"}}>{k}</td>
+              <td style={{border:"1px solid #ccc",padding:"4px 8px",textAlign:"right"}}>{won(v)}</td>
+              <td style={{border:"1px solid #ccc",padding:"4px 8px"}}></td>
+            </tr>
+          ))}
+          <tr style={{background:"#fff0f0",fontWeight:"bold"}}>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px"}}>공제 합계</td>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px",textAlign:"right",
+              fontSize:"10pt"}}>{won(totalDeduct)}</td>
+            <td style={{border:"1px solid #ccc",padding:"5px 8px"}}></td>
+          </tr>
+        </tbody>
+      </table>
+      {/* 실수령액 */}
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:"11pt",fontWeight:"bold"}}>
+        <tbody>
+          <tr style={{background:"#0f1319",color:"#e3c86e"}}>
+            <td style={{border:"2px solid #c9a84c",padding:"8px 12px",width:"50%",textAlign:"center"}}>
+              실 수 령 액
+            </td>
+            <td style={{border:"2px solid #c9a84c",padding:"8px 12px",textAlign:"right",
+              fontSize:"13pt"}}>
+              {won(net)} 원
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div style={{marginTop:12,fontSize:"8pt",color:"#666",lineHeight:1.7}}>
+        ※ 본 명세서는 근로기준법 제48조 제2항에 따라 교부합니다.<br/>
+        ※ 산재보험료는 전액 사업주 부담입니다.
+      </div>
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════
+   퇴직금 계산기 (근퇴법 §8, 근기법 §2)
+═══════════════════════════════════════ */
+function RetirementScreen({onBack,lang,setLang,fontSize,setFontSize,gearOpen,setGearOpen}){
+  const ko=lang==='ko';
+  const won=n=>Math.round(n||0).toLocaleString();
+  const [tab,setTab]=useState('avg'); // avg|std|db|dc
+  // 공통: 근속기간
+  const [startDate,setStartDate]=useState('');
+  const [endDate,setEndDate]=useState('');
+  const [lastDayMode,setLastDayMode]=useState(false);
+  // 평균임금 탭
+  const [m1,setM1]=useState('');  // 퇴직전 3개월 각 임금
+  const [m2,setM2]=useState('');
+  const [m3,setM3]=useState('');
+  const [d1,setD1]=useState('31'); // 각 달 일수
+  const [d2s,setD2s]=useState('30');
+  const [d3s,setD3s]=useState('31');
+  const [bonus,setBonus]=useState(''); // 연간 상여금 총액
+  const [leavePay,setLeavePay]=useState(''); // 연간 연차수당
+  // 통상임금 탭
+  const [monthlyStd,setMonthlyStd]=useState('');  // 월 통상임금
+  // DC형
+  const [annualWage,setAnnualWage]=useState('');   // 연간 임금총액
+  const [returnRate,setReturnRate]=useState('3.0'); // 예상 운용수익률
+
+  // 근속 계산
+  const tenure = useMemo(()=>{
+    if(!startDate||!endDate) return null;
+    const s=new Date(startDate);
+    const rawE=new Date(endDate);
+    const e=lastDayMode?new Date(rawE.getTime()+86400000):rawE;
+    if(e<=s) return null;
+    const totalDays=Math.floor((e-s)/(1000*60*60*24));
+    const years=totalDays/365.25;
+    const y=Math.floor(years);
+    const rem=totalDays-(y*365);
+    const m=Math.floor(rem/30);
+    const d=rem-(m*30);
+    return{totalDays,years,y,m,d};
+  },[startDate,endDate,lastDayMode]);
+
+  const eligible = tenure && tenure.totalDays>=365; // 1년 이상
+
+  // 평균임금 계산
+  const avgResult = useMemo(()=>{
+    if(!tenure) return null;
+    const wages=[parseFloat(m1)||0,parseFloat(m2)||0,parseFloat(m3)||0];
+    const days3m=(parseFloat(d1)||31)+(parseFloat(d2s)||30)+(parseFloat(d3s)||31);
+    const bonusAmt=parseFloat(bonus)||0;
+    const leaveAmt=parseFloat(leavePay)||0;
+    const total3m=wages.reduce((a,b)=>a+b,0)+(bonusAmt*3/12)+(leaveAmt*3/12);
+    const avgDaily=days3m>0?total3m/days3m:0;
+    const retirement=eligible?avgDaily*30*(tenure.totalDays/365):0;
+    return{avgDaily,retirement,days3m,total3m};
+  },[m1,m2,m3,d1,d2s,d3s,bonus,leavePay,tenure,eligible]);
+
+  // 통상임금 계산
+  const stdResult = useMemo(()=>{
+    if(!tenure) return null;
+    const mStd=parseFloat(monthlyStd)||0;
+    const dailyStd=mStd*12/365;
+    const retirement=eligible?dailyStd*30*(tenure.totalDays/365):0;
+    return{dailyStd,retirement};
+  },[monthlyStd,tenure,eligible]);
+
+  // DB형: 평균임금 기준과 동일 (avgResult 재사용)
+  // DC형 계산
+  const dcResult = useMemo(()=>{
+    if(!tenure) return null;
+    const annual=parseFloat(annualWage)||0;
+    const rate=(parseFloat(returnRate)||0)/100;
+    const yearsFrac=tenure.totalDays/365.25;
+    // DC형: 매년 '연간임금 ÷ 12'(= 한 달치 월급)를 적립
+    const yearly=annual/12;          // 연간 납입액 (한 해 적립액)
+    // 원금 합계 = 연간 납입액 × 근속연수
+    const base=yearly*yearsFrac;
+    // 연복리 운용 추정: 매년 yearly를 넣고 남은 기간만큼 복리
+    let compound=0;
+    const yrs=Math.floor(yearsFrac);
+    for(let i=1;i<=yrs;i++){
+      compound+=yearly*Math.pow(1+rate,yearsFrac-i);
+    }
+    if(yearsFrac>yrs){
+      compound+=yearly*(yearsFrac-yrs); // 1년 미만 잔여기간(수익 미적용 보수적)
+    }
+    return{base,compound,annualInput:yearly,yearsFrac};
+  },[annualWage,returnRate,tenure]);
+
+  const TABS=[
+    {id:'avg',label:'평균임금',sub:'법정 기준'},
+    {id:'std',label:'통상임금',sub:'비교 검토'},
+    {id:'db', label:'DB형',   sub:'확정급여형'},
+    {id:'dc', label:'DC형',   sub:'확정기여형'},
+  ];
+
+  return(
+    <div style={{background:C.bg0,minHeight:'100vh',
+      fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:520,margin:'0 auto'}}>
+      <SubHdr title="🏦 퇴직금 계산기" back={onBack}
+        lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize}
+        gearOpen={gearOpen} setGearOpen={setGearOpen}/>
+
+      <div style={{padding:'14px 16px 80px'}}>
+
+        {/* 탭 */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:5,marginBottom:16}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)}
+              style={{padding:'8px 4px',borderRadius:10,border:'none',fontFamily:'inherit',
+                cursor:'pointer',textAlign:'center',
+                background:tab===t.id?'linear-gradient(135deg,#c9a84c,#a87028)':'#141920',
+                color:tab===t.id?'#07090d':'#8890a4',
+                boxShadow:tab===t.id?'0 3px 12px rgba(201,168,76,0.35)':'none'}}>
+              <div style={{fontSize:12,fontWeight:800}}>{t.label}</div>
+              <div style={{fontSize:9,opacity:.75}}>{t.sub}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* ── 공통: 근속기간 ── */}
+        <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:12,padding:'14px',marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:8}}>📅 근속기간 (공통)</div>
+          <div style={{background:'rgba(201,168,76,0.07)',border:'1px solid rgba(201,168,76,0.25)',
+            borderRadius:8,padding:'9px 11px',marginBottom:10,fontSize:11,color:C.txt2,lineHeight:1.7}}>
+            <b style={{color:C.goldL}}>퇴직일 = 마지막 근무일의 다음 날</b><br/>
+            예) 12월 31일이 마지막 출근일 → 퇴직일은 <b style={{color:C.txt1}}>다음해 1월 1일</b><br/>
+            근기법상 퇴직일 = 근로관계가 실제로 끝나는 날(마지막 근무일+1일)
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+            <button onClick={()=>setLastDayMode(p=>!p)}
+              style={{background:lastDayMode?C.gold:'#1a2030',
+                border:`1px solid ${lastDayMode?C.gold:C.bdrD}`,
+                color:lastDayMode?'#07090d':C.txt3,
+                borderRadius:6,padding:'4px 10px',fontSize:11,fontWeight:700,
+                cursor:'pointer',fontFamily:'inherit',flexShrink:0}}>
+              {lastDayMode?'ON: 마지막 근무일 입력':'OFF: 퇴직일 직접 입력'}
+            </button>
+            <span style={{fontSize:10,color:C.txt3,lineHeight:1.5}}>
+              {lastDayMode?'입력한 날 자동 +1일 = 퇴직일':'퇴직일(마지막근무일+1)을 직접 입력'}
+            </span>
+          </div>
+          <div style={R2}>
+            <RetFieldRow label="입사일 *">
+              <DateInput style={INP} value={startDate} onChange={e=>setStartDate(e.target.value)} label="입사일 선택"/>
+            </RetFieldRow>
+            <RetFieldRow label={lastDayMode?"마지막 근무일 *":"퇴직일 * (마지막 근무일의 다음날)"}>
+              <DateInput style={INP} value={endDate} onChange={e=>setEndDate(e.target.value)} label={lastDayMode?"마지막 근무일 선택":"퇴직일 선택"}/>
+            </RetFieldRow>
+          </div>
+          {tenure&&(
+            <div style={{marginTop:6,padding:'8px 12px',background:C.bg0,borderRadius:8,
+              fontSize:12,color:C.txt1,lineHeight:1.8}}>
+              <span style={{fontWeight:800,color:C.goldL}}>
+                {tenure.y}년 {tenure.m}개월 {tenure.d}일
+              </span>
+              <span style={{color:C.txt3,marginLeft:8}}>({tenure.totalDays.toLocaleString()}일)</span>
+              {!eligible&&(
+                <div style={{color:C.red,fontSize:11,marginTop:3}}>
+                  ⚠ 계속근로 1년 미만 — 법정 퇴직금 발생하지 않습니다
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── 평균임금 탭 ── */}
+        {tab==='avg'&&(
+          <div>
+            <RetInfoBox text={
+              `📌 평균임금 = (퇴직 전 3개월 임금 + 연간상여금×3/12 + 연차수당×3/12) ÷ 3개월 총일수\n` +
+              `퇴직금 = 1일 평균임금 × 30일 × 근속일수÷365 (근기법 §2, 근퇴법 §8)`
+            }/>
+            <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:12,padding:14}}>
+              <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:10}}>퇴직 전 3개월 임금</div>
+              {[
+                ['3개월 전 임금(원)',m1,setM1,d1,setD1],
+                ['2개월 전 임금(원)',m2,setM2,d2s,setD2s],
+                ['1개월 전 임금(원)',m3,setM3,d3s,setD3s],
+              ].map(([label,val,set,dv,ds],i)=>(
+                <div key={i} style={{display:'grid',gridTemplateColumns:'1fr auto',gap:8,marginBottom:8}}>
+                  <RetFieldRow label={label}>
+                    <MoneyInput style={INP} placeholder="3,000,000" value={val} onChange={nv=>set(nv)}/>
+                  </RetFieldRow>
+                  <RetFieldRow label="해당월 일수">
+                    <input style={{...INP,width:52,padding:'9px 4px',textAlign:'center'}} type="number" inputMode="numeric"
+                      min="28" max="31" value={dv} onChange={e=>ds(e.target.value)}/>
+                  </RetFieldRow>
+                </div>
+              ))}
+              <div style={{height:1,background:C.bdrD,margin:'8px 0'}}/>
+              <div style={R2}>
+                <RetFieldRow label="연간 상여금 총액(원)">
+                  <MoneyInput style={INP} placeholder="0" value={bonus} onChange={nv=>setBonus(nv)}/>
+                </RetFieldRow>
+                <RetFieldRow label="연간 연차수당(원)">
+                  <MoneyInput style={INP} placeholder="0" value={leavePay} onChange={nv=>setLeavePay(nv)}/>
+                </RetFieldRow>
+              </div>
+            </div>
+            {avgResult&&avgResult.avgDaily>0&&(
+              <div style={{marginTop:12}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>3개월 임금합계</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.txt1}}>{won(avgResult.total3m)}원</div>
+                  </div>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>3개월 총일수</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.txt1}}>{avgResult.days3m}일</div>
+                  </div>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>1일 평균임금</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.goldL}}>{won(avgResult.avgDaily)}원</div>
+                  </div>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>30일분 평균임금</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.txt1}}>{won(avgResult.avgDaily*30)}원</div>
+                  </div>
+                </div>
+                {eligible
+                  ?<RetResultBox label="예상 퇴직금 (평균임금 기준)" amount={avgResult.retirement}
+                      sub={`1일 평균임금 ${won(avgResult.avgDaily)}원 × 30일 × ${(tenure.totalDays/365).toFixed(4)}년`}/>
+                  :<div style={{marginTop:12,padding:'12px',background:'rgba(217,80,80,0.08)',
+                    border:'1px solid rgba(217,80,80,0.3)',borderRadius:12,fontSize:12,color:C.red,textAlign:'center'}}>
+                    계속근로 1년 이상이어야 퇴직금이 발생합니다
+                  </div>
+                }
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── 통상임금 탭 ── */}
+        {tab==='std'&&(
+          <div>
+            <RetInfoBox text={
+              `📌 통상임금 = 기본급 + 정기·일률·고정적으로 지급되는 수당의 합계\n` +
+              `1일 통상임금 = 월 통상임금 × 12 ÷ 365\n` +
+              `평균임금 < 통상임금이면 통상임금으로 퇴직금 계산 (근기법 §2②)\n` +
+              `→ 평균임금 탭과 비교 후 높은 금액 적용`
+            }/>
+            <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:12,padding:14}}>
+              <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:10}}>월 통상임금</div>
+              <RetFieldRow label="기본급 (원)">
+                <MoneyInput style={INP} placeholder="기본급" value={monthlyStd} onChange={nv=>setMonthlyStd(nv)}/>
+              </RetFieldRow>
+              <div style={{fontSize:11,color:C.txt3,marginTop:4,lineHeight:1.6}}>
+                ※ 식대·교통비 등 고정 지급 수당은 기본급에 합산하여 입력하세요<br/>
+                ※ 초과근무수당·상여금(비고정)은 제외
+              </div>
+            </div>
+            {stdResult&&stdResult.dailyStd>0&&(
+              <div style={{marginTop:12}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:4}}>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>1일 통상임금</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.goldL}}>{won(stdResult.dailyStd)}원</div>
+                    <div style={{fontSize:9,color:C.txt3}}>월통상임금×12÷365</div>
+                  </div>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>30일분 통상임금</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.txt1}}>{won(stdResult.dailyStd*30)}원</div>
+                  </div>
+                </div>
+                {eligible
+                  ?<RetResultBox label="예상 퇴직금 (통상임금 기준)" amount={stdResult.retirement}
+                      sub={`1일 통상임금 ${won(stdResult.dailyStd)}원 × 30일 × ${(tenure.totalDays/365).toFixed(4)}년`}/>
+                  :<div style={{marginTop:12,padding:'12px',background:'rgba(217,80,80,0.08)',
+                    border:'1px solid rgba(217,80,80,0.3)',borderRadius:12,fontSize:12,color:C.red,textAlign:'center'}}>
+                    계속근로 1년 이상이어야 퇴직금이 발생합니다
+                  </div>
+                }
+                {stdResult&&avgResult?.avgDaily>0&&eligible&&(
+                  <div style={{marginTop:8,padding:'10px 12px',borderRadius:10,fontSize:12,
+                    background: stdResult.retirement>avgResult.retirement
+                      ?'rgba(58,184,122,0.08)':'rgba(201,168,76,0.06)',
+                    border:`1px solid ${stdResult.retirement>avgResult.retirement?'rgba(58,184,122,0.3)':'rgba(201,168,76,0.2)'}`}}>
+                    <span style={{fontWeight:700,
+                      color:stdResult.retirement>avgResult.retirement?C.green:C.gold}}>
+                      {stdResult.retirement>avgResult.retirement
+                        ?'✓ 통상임금 기준이 더 높음 → 통상임금 적용'
+                        :'평균임금 기준이 더 높음 → 평균임금 탭 값 적용'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── DB형 탭 ── */}
+        {tab==='db'&&(
+          <div>
+            <RetInfoBox text={
+              `📌 DB형(확정급여형) 퇴직연금 (근퇴법 §15)\n` +
+              `급여 = 퇴직 직전 3개월 평균임금 × 30일 × 근속연수\n` +
+              `계산 방식은 법정퇴직금과 동일 — 차이점:\n` +
+              `· 사용자가 외부 금융기관에 적립·운용\n` +
+              `· 중간정산 원칙 불가 (사유 있을 때 예외)\n` +
+              `· 운용 손실은 사용자가 부담\n` +
+              `→ 평균임금 탭에서 계산한 값이 DB형 예상 급여와 동일합니다`
+            }/>
+            {avgResult?.retirement>0&&eligible
+              ?<RetResultBox label="DB형 퇴직연금 예상 급여 (= 법정퇴직금)" amount={avgResult.retirement}
+                  sub="퇴직 직전 3개월 평균임금 기준 · 평균임금 탭에서 임금을 입력하세요"/>
+              :<div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:12,
+                padding:'20px',textAlign:'center',color:C.txt3,fontSize:13}}>
+                평균임금 탭에서 퇴직 전 3개월 임금을 먼저 입력하면<br/>
+                DB형 예상 급여가 여기에 표시됩니다
+              </div>
+            }
+            <div style={{marginTop:14,background:'rgba(139,110,224,0.07)',
+              border:'1px solid rgba(139,110,224,0.2)',borderRadius:10,padding:'12px',fontSize:11,
+              color:C.txt2,lineHeight:1.8}}>
+              <b style={{color:C.purple}}>DB vs DC 선택 기준</b><br/>
+              <b>DB유리:</b> 임금이 꾸준히 오르는 경우, 장기근속 예정<br/>
+              <b>DC유리:</b> 임금 변동 적거나, 본인이 직접 운용하고 싶을 때<br/>
+              근퇴법 §13에 따라 근로자가 선택하거나 사용자가 설정
+            </div>
+          </div>
+        )}
+
+        {/* ── DC형 탭 ── */}
+        {tab==='dc'&&(
+          <div>
+            <RetInfoBox text={
+              `📌 DC형(확정기여형) 퇴직연금 (근퇴법 §20)\n` +
+              `사용자가 매년 '연간 임금총액의 1/12'(= 한 달치 월급)을 근로자 계좌에 적립\n` +
+              `예) 월급 280만원 → 연간임금 3,360만원 → 매년 280만원씩 적립\n` +
+              `근로자가 직접 운용 → 최종 수령액은 운용수익에 따라 달라짐`
+            }/>
+            <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:12,padding:14}}>
+              <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:10}}>DC형 입력</div>
+              <RetFieldRow label="연간 임금총액 (원) = 월급 × 12개월">
+                <MoneyInput style={INP} placeholder="예) 33,600,000 (월 280만×12)" value={annualWage} onChange={nv=>setAnnualWage(nv)}/>
+              </RetFieldRow>
+              <div style={{fontSize:11,color:C.txt3,marginTop:-4,marginBottom:8,lineHeight:1.6}}>
+                ※ 상여금·고정수당 포함 1년치 총액. 매년 이 금액의 1/12이 적립됩니다
+              </div>
+              <RetFieldRow label="예상 연 운용수익률 (%)">
+                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:6}}>
+                  {['1.0','2.0','3.0','4.0','5.0'].map(r=>(
+                    <button key={r} onClick={()=>setReturnRate(r)}
+                      style={{padding:'4px 10px',borderRadius:6,border:'none',fontFamily:'inherit',
+                        fontSize:12,fontWeight:700,cursor:'pointer',
+                        background:returnRate===r?C.gold:'#1a2030',
+                        color:returnRate===r?'#07090d':C.txt2}}>
+                      {r}%
+                    </button>
+                  ))}
+                </div>
+                <input style={{...INP,width:'100%'}} type="number" step="0.1" min="0" max="20"
+                  value={returnRate} onChange={e=>setReturnRate(e.target.value)}/>
+              </RetFieldRow>
+            </div>
+            {dcResult&&dcResult.annualInput>0&&(
+              <div style={{marginTop:12}}>
+                <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,
+                  padding:'12px 14px',marginBottom:8}}>
+                  <div style={{fontSize:11,color:C.txt3,marginBottom:2}}>매년 적립액 (연간 임금총액 ÷ 12)</div>
+                  <div style={{fontSize:16,fontWeight:800,color:C.goldL}}>{won(dcResult.annualInput)}원/년</div>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:4}}>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>원금 적립 합계</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.txt1}}>{won(dcResult.base)}원</div>
+                    <div style={{fontSize:9,color:C.txt3}}>적립액 × {dcResult.yearsFrac.toFixed(2)}년</div>
+                  </div>
+                  <div style={{background:C.bg1,border:`1px solid ${C.bdrD}`,borderRadius:10,padding:'10px 12px'}}>
+                    <div style={{fontSize:10,color:C.txt3}}>운용수익 포함 추정</div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.green}}>{won(dcResult.compound)}원</div>
+                    <div style={{fontSize:9,color:C.txt3}}>연복리 {returnRate}% 가정</div>
+                  </div>
+                </div>
+                {eligible
+                  ?<RetResultBox label={`DC형 예상 수령액 (연복리 ${returnRate}%)`}
+                      amount={dcResult.compound}
+                      sub={`원금 ${won(dcResult.base)}원 + 추정수익 ${won(dcResult.compound-dcResult.base)}원`}
+                      color="#5de0a0"/>
+                  :<div style={{marginTop:12,padding:'12px',background:'rgba(217,80,80,0.08)',
+                    border:'1px solid rgba(217,80,80,0.3)',borderRadius:12,fontSize:12,color:C.red,textAlign:'center'}}>
+                    계속근로 1년 미만이라도 DC형은 납입액 수령 가능 (운용분 포함)
+                  </div>
+                }
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 하단 공통 주의 */}
+        <div style={{marginTop:20,padding:'10px 12px',background:C.bg1,
+          border:`1px solid ${C.bdrD}`,borderRadius:9,fontSize:11,color:C.txt3,lineHeight:1.7}}>
+          본 계산기는 참고용입니다. 실제 퇴직금은 퇴직금 규정·단체협약에 따라 달라질 수 있으며,
+          세금(퇴직소득세) 공제 전 금액입니다. 정확한 금액은 사업장 또는 공인노무사에게 확인하세요.
+          문의: ☎ 1350
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PayslipScreen({onBack,lang,setLang,fontSize,setFontSize,gearOpen,setGearOpen,calcData}){
+  const ko=lang==='ko';
+  const psRef=useRef(null);
+  const [fields,setFields]=useState({
+    workerName:calcData?.workerName||"",
+    workerBirth:"",
+    bizName:calcData?.bizName||"",
+    payDate:"",
+    periodFrom:"",periodTo:"",
+    basePay:calcData?.basePay||"",
+    basePay_raw:calcData?.basePay||"",
+    baseCalc:calcData?.baseCalc||"",
+    allowance:calcData?.allowance||"",
+    allowanceNote:calcData?.allowanceNote||"",
+    otPay:calcData?.otPay||"",
+    otCalc:calcData?.otCalc||"",
+    otHours:calcData?.otHours||"",
+    nightPay:calcData?.nightPay||"",
+    nightCalc:calcData?.nightCalc||"",
+    nightHours:calcData?.nightHours||"",
+    holidayPay:"",holidayCalc:"",holidayHours:"",
+    empIns:"",indAcc:"0",pension:"",health:"",longCare:"",
+    incomeTax:"",localTax:"",
+  });
+  const up=(k,v)=>setFields(p=>({...p,[k]:v}));
+  const [step,setStep]=useState("input");
+
+  const printPS=()=>{
+    const el=psRef.current; if(!el) return;
+    const w=window.open("","_blank");
+    if(!w){alert("팝업이 차단됐습니다.");return;}
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+      <style>*{box-sizing:border-box}body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif}
+      @page{size:A4 portrait;margin:0}@media print{html,body{-webkit-print-color-adjust:exact}}</style>
+      </head><body>${el.innerHTML}</body></html>`);
+    w.document.close(); setTimeout(()=>{w.focus();w.print();},700);
+  };
+
+  const INP2={...INP,background:"#0f1319"};
+  const from_calc = !!calcData;
+
+  return(
+    <div style={{background:C.bg0,minHeight:"100vh",
+      fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:520,margin:"0 auto"}}>
+      <SubHdr
+        title={step==="input"?"💴 임금명세서 작성":"📄 임금명세서 미리보기"}
+        back={step==="preview"?()=>setStep("input"):onBack}
+        lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize}
+        gearOpen={gearOpen} setGearOpen={setGearOpen}
+        right={step==="preview"&&<button onClick={printPS}
+          style={{background:`linear-gradient(135deg,${C.gold},#a87028)`,color:"#07090d",
+            border:"none",borderRadius:8,padding:"6px 11px",fontSize:12,fontWeight:800,
+            cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>🖨 PDF</button>}
+      />
+
+      {step==="input"&&(
+        <div style={{padding:"14px 16px 100px"}}>
+
+          {/* 급여계산기 연동 안내 */}
+          <div style={{background:"rgba(201,168,76,0.07)",border:"1.5px solid rgba(201,168,76,0.3)",
+            borderRadius:12,padding:"12px 14px",marginBottom:16}}>
+            <div style={{fontSize:13,fontWeight:700,color:C.goldL,marginBottom:5}}>
+              💡 급여 계산기에서 자동 입력 가능
+            </div>
+            <div style={{fontSize:12,color:C.txt2,lineHeight:1.65}}>
+              급여 계산기에서 시급·근무시간을 입력하고 계산 후<br/>
+              <b style={{color:C.goldL}}>「임금명세서 바로 작성」</b> 버튼을 누르면<br/>
+              기본급·연장·야간 수당과 산출근거가 자동으로 채워집니다.
+            </div>
+            {from_calc&&<div style={{marginTop:8,fontSize:12,color:C.green,fontWeight:700}}>
+              ✓ 계산기 데이터가 자동으로 적용되었습니다
+            </div>}
+          </div>
+
+          {/* 법적 필수항목 안내 */}
+          <div style={{background:"rgba(139,110,224,0.07)",border:"1px solid rgba(139,110,224,0.25)",
+            borderRadius:10,padding:"10px 12px",marginBottom:16,fontSize:11,color:C.txt2,lineHeight:1.7}}>
+            📋 <b style={{color:C.purple}}>법적 필수 기재사항</b> (근기법 §48②, 시행령 §27의2)<br/>
+            성명·생년월일·지급일·임금총액·구성항목별 금액·<br/>
+            공제항목별 금액·실수령액·연장·야간·휴일수당 산출근거
+          </div>
+
+          {/* 근로자 정보 */}
+          <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:8}}>👤 근로자·사업장 정보</div>
+          <div style={R2}>
+            <FLD label="근로자 성명 *"><input style={INP2} value={fields.workerName} onChange={e=>up("workerName",e.target.value)}/></FLD>
+            <FLD label="생년월일 * (필수)"><DateInput style={INP2} value={fields.workerBirth} onChange={e=>up("workerBirth",e.target.value)} label="날짜 선택"/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="사업장명"><input style={INP2} value={fields.bizName} onChange={e=>up("bizName",e.target.value)}/></FLD>
+            <FLD label="임금 지급일 *"><DateInput style={INP2} value={fields.payDate} onChange={e=>up("payDate",e.target.value)} label="날짜 선택"/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="지급 대상기간 시작"><DateInput style={INP2} value={fields.periodFrom} onChange={e=>up("periodFrom",e.target.value)} label="날짜 선택"/></FLD>
+            <FLD label="지급 대상기간 종료"><DateInput style={INP2} value={fields.periodTo} onChange={e=>up("periodTo",e.target.value)} label="날짜 선택"/></FLD>
+          </div>
+
+          {/* 지급 내역 */}
+          <div style={{fontSize:12,fontWeight:800,color:C.goldL,margin:"14px 0 8px"}}>💰 지급 내역 (항목별 필수)</div>
+          <div style={R2}>
+            <FLD label="기본급 (원) *"><MoneyInput style={INP2} value={fields.basePay} onChange={v=>up("basePay",v)}/></FLD>
+            <FLD label="기본급 산출근거"><input style={INP2} placeholder="예) 10,320×소정시간" value={fields.baseCalc} onChange={e=>up("baseCalc",e.target.value)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="제수당 합계 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.allowance} onChange={v=>up("allowance",v)}/></FLD>
+            <FLD label="수당 내용"><input style={INP2} placeholder="식비5만+교통비3만" value={fields.allowanceNote} onChange={e=>up("allowanceNote",e.target.value)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="연장근로수당 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.otPay} onChange={v=>up("otPay",v)}/></FLD>
+            <FLD label="연장 산출근거"><input style={INP2} placeholder="예) 5h×10,320×1.5" value={fields.otCalc} onChange={e=>up("otCalc",e.target.value)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="야간근로수당 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.nightPay} onChange={v=>up("nightPay",v)}/></FLD>
+            <FLD label="야간 산출근거"><input style={INP2} placeholder="예) 2h×10,320×0.5" value={fields.nightCalc} onChange={e=>up("nightCalc",e.target.value)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="휴일근로수당 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.holidayPay} onChange={v=>up("holidayPay",v)}/></FLD>
+            <FLD label="휴일 산출근거"><input style={INP2} placeholder="예) 4h×10,320×1.5" value={fields.holidayCalc} onChange={e=>up("holidayCalc",e.target.value)}/></FLD>
+          </div>
+
+          {/* 공제 내역 */}
+          <div style={{fontSize:12,fontWeight:800,color:"#e88",margin:"14px 0 8px"}}>🔻 공제 내역 (항목별 필수)</div>
+          <div style={{fontSize:11,color:C.txt3,marginBottom:8,lineHeight:1.6}}>
+            산재보험료는 전액 사업주 부담으로 미기재, 나머지는 근로자 부담분 입력
+          </div>
+          <div style={R2}>
+            <FLD label="고용보험료 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.empIns} onChange={v=>up("empIns",v)}/></FLD>
+            <FLD label="국민연금 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.pension} onChange={v=>up("pension",v)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="건강보험료 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.health} onChange={v=>up("health",v)}/></FLD>
+            <FLD label="장기요양보험료 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.longCare} onChange={v=>up("longCare",v)}/></FLD>
+          </div>
+          <div style={R2}>
+            <FLD label="소득세 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.incomeTax} onChange={v=>up("incomeTax",v)}/></FLD>
+            <FLD label="지방소득세 (원)"><MoneyInput style={INP2} placeholder="0" value={fields.localTax} onChange={v=>up("localTax",v)}/></FLD>
+          </div>
+        </div>
+      )}
+
+      {step==="preview"&&(
+        <div style={{padding:"12px 10px 40px"}}>
+          <div style={{fontSize:11,color:C.txt3,textAlign:"center",marginBottom:10}}>
+            📄 A4 실제 출력물과 동일 · PDF 저장 후 인쇄
+          </div>
+          <div style={{background:"#d0d0d0",borderRadius:10,padding:"10px 8px"}}>
+            <ScaledPreview pRef={psRef}><PayslipPreview f={fields} pRef={psRef}/></ScaledPreview>
+          </div>
+        </div>
+      )}
+
+      {step==="input"&&(
+        <div style={{position:"fixed",bottom:0,left:0,right:0,
+          background:C.bg1,borderTop:`1px solid ${C.bdrD}`,padding:"12px 16px",zIndex:15}}>
+          <BigBtn onClick={()=>setStep("preview")}>미리보기 · 저장 →</BigBtn>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LawScreen({onBack,lang,setLang,fontSize,setFontSize,gearOpen,setGearOpen}){
   const _hp={lang,setLang,fontSize,setFontSize,gearOpen,setGearOpen};
   const [step,setStep]=useState(0); // 0:인원 1:업종 2:결과
@@ -1352,6 +2261,7 @@ function LawScreen({onBack,lang,setLang,fontSize,setFontSize,gearOpen,setGearOpe
 export default function App(){
   // 화면: home | contract | calc | law
   const [screen, setScreen] = useState("home");
+  const [calcData, setCalcData] = useState(null);
   const [lang,setLang]=useState("ko");
   const [fontSize,setFontSize]=useState("m");
   const [gearOpen,setGearOpen]=useState(false);
@@ -1427,13 +2337,6 @@ export default function App(){
       </head><body>${el.innerHTML}</body></html>`);
     w.document.close(); setTimeout(()=>{w.focus();w.print();},700);
   };
-
-  const Hdr=({title,back,right})=>(
-    <SubHdr title={title} back={back} right={right}
-      lang={lang} setLang={setLang}
-      fontSize={fontSize} setFontSize={setFontSize}
-      gearOpen={gearOpen} setGearOpen={setGearOpen}/>
-  );
   /* ── 홈 ── */
   if(screen==="home") return(
     <div style={{background:'#0b0e14',minHeight:'100vh',
@@ -1495,6 +2398,22 @@ export default function App(){
               boxShadow:'0 8px 30px rgba(124,95,224,0.5)',letterSpacing:'0.3px'}}>
             💵 {lang==='ko'?'급여 계산기':'Payroll Calculator'}
           </button>
+          <button onClick={()=>{setCalcData(null);setScreen('payslip');}}
+            style={{marginTop:9,width:'100%',maxWidth:310,border:'1.5px solid rgba(58,184,122,0.45)',
+              background:'rgba(58,184,122,0.07)',
+              color:'#3ab87a',borderRadius:16,padding:'13px 30px',fontSize:17,fontWeight:800,
+              cursor:'pointer',fontFamily:'inherit',letterSpacing:'0.3px',
+              display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+            💴 {lang==='ko'?'임금명세서 작성':'Payslip'}
+          </button>
+          <button onClick={()=>setScreen('retirement')}
+            style={{marginTop:9,width:'100%',maxWidth:310,border:'1.5px solid rgba(227,200,110,0.35)',
+              background:'rgba(201,168,76,0.07)',
+              color:'#c9a84c',borderRadius:16,padding:'13px 30px',fontSize:17,fontWeight:800,
+              cursor:'pointer',fontFamily:'inherit',letterSpacing:'0.3px',
+              display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+            🏦 {lang==='ko'?'퇴직금 계산기':'Retirement Pay'}
+          </button>
           <div style={{width:'100%',maxWidth:310,marginTop:14,fontSize:11,
             color:'#414a5c',lineHeight:1.7,textAlign:'center'}}>
             2026 {lang==='ko'?'최저임금':'Min. Wage'} <b style={{color:'#8890a4'}}>{lang==='ko'?'시급 10,320원':'₩10,320/hr'}</b>
@@ -1508,20 +2427,24 @@ export default function App(){
     /* ── 의무 길잡이 ── */
   if(screen==="law") return <LawScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize} gearOpen={gearOpen} setGearOpen={setGearOpen}/>;
 
+  if(screen==="retirement") return <RetirementScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize} gearOpen={gearOpen} setGearOpen={setGearOpen}/>;
+
+  if(screen==="payslip") return <PayslipScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize} gearOpen={gearOpen} setGearOpen={setGearOpen} calcData={calcData}/>;
+
   /* ── 계약서 ── */
   if(screen==="contract"){
     const Prev=PrevMap[ctTab]; const Inp=InputMap[ctTab];
     const meta=FORM_TYPES.find(f=>f.id===ctTab);
     return(
       <div style={{background:C.bg0,minHeight:"100vh",fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif"}}>
-        <Hdr title={ctStep==="input"?`${meta.ic} ${meta.label}`:"📄 미리보기"}
+        <SubHdr title={ctStep==="input"?`${meta.ic} ${meta.label}`:"📄 미리보기"}
           back={ctStep==="preview"?()=>setCtStep("input"):()=>setScreen("home")}
+          lang={lang} setLang={setLang} fontSize={fontSize} setFontSize={setFontSize}
+          gearOpen={gearOpen} setGearOpen={setGearOpen}
           right={ctStep==="preview"&&(
-            <div style={{display:"flex",gap:6}}>
-              <button onClick={printPDF} style={{background:`linear-gradient(135deg,${C.gold},#a87028)`,
-                color:"#07090d",border:"none",borderRadius:8,padding:"7px 12px",fontSize:12,
-                fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>🖨 PDF</button>
-            </div>
+            <button onClick={printPDF} style={{background:`linear-gradient(135deg,${C.gold},#a87028)`,
+              color:"#07090d",border:"none",borderRadius:8,padding:"7px 12px",fontSize:12,
+              fontWeight:800,cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>🖨 PDF</button>
           )}/>
 
         {ctStep==="input"&&(
@@ -1943,6 +2866,32 @@ export default function App(){
                   won(wkResult.weekTotal/((wkResult.sojMin+wkResult.otMin)/60+wkResult.juhyuH))
                 }원 {underMin?"⚠ 최저임금 미달":"✓ 최저임금 이상"}
               </div>
+              {/* 임금명세서 바로 작성 */}
+              <div style={{padding:"10px 14px",borderTop:`1px solid ${C.bdrD}`,background:"rgba(58,184,122,0.04)"}}>
+                <button onClick={()=>{
+                  const otH=(wkResult.otMin||0)/60;
+                  const ntH=(wkResult.nightTotal||0)/60;
+                  const basePay=Math.round(wkResult.sojMin/60*hourlyNum+(wkResult.hasJuhyu?wkResult.juhyuPay:0));
+                  const otPay=Math.round(otH*hourlyNum*1.5);
+                  const nightPay=Math.round(ntH*hourlyNum*0.5);
+                  setCalcData({
+                    basePay:String(basePay),
+                    baseCalc:`${won(hourlyNum)}원 × 소정${(wkResult.sojMin/60).toFixed(1)}h${wkResult.hasJuhyu?" + 주휴수당":""}`,
+                    otPay:otPay>0?String(otPay):"",
+                    otCalc:otPay>0?`${otH.toFixed(1)}h × ${won(hourlyNum)}원 × 1.5`:"",
+                    otHours:otH>0?String(otH.toFixed(1)):"",
+                    nightPay:nightPay>0?String(nightPay):"",
+                    nightCalc:nightPay>0?`${ntH.toFixed(1)}h × ${won(hourlyNum)}원 × 0.5`:"",
+                    nightHours:ntH>0?String(ntH.toFixed(1)):"",
+                  });
+                  setScreen("payslip");
+                }} style={{width:"100%",background:"linear-gradient(135deg,#2a6040,#1d4a30)",
+                  border:"1.5px solid rgba(58,184,122,0.4)",color:"#3ab87a",
+                  borderRadius:10,padding:"9px",fontSize:13,fontWeight:800,
+                  cursor:"pointer",fontFamily:"inherit"}}>
+                  💴 임금명세서 바로 작성 →
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -2138,6 +3087,17 @@ export default function App(){
                   WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>
                   {won(logResult.grand)}원
                 </span>
+              </div>
+              <div style={{padding:"8px 14px",borderTop:`1px solid ${C.bdrD}`}}>
+                <button onClick={()=>{
+                  setCalcData({basePay:String(logResult.grand),baseCalc:"비정기 스케줄 계산 결과"});
+                  setScreen("payslip");
+                }} style={{width:"100%",background:"rgba(58,184,122,0.07)",
+                  border:"1.5px solid rgba(58,184,122,0.35)",color:"#3ab87a",
+                  borderRadius:10,padding:"8px",fontSize:13,fontWeight:800,
+                  cursor:"pointer",fontFamily:"inherit"}}>
+                  💴 임금명세서 바로 작성 →
+                </button>
               </div>
             </div>
           )}

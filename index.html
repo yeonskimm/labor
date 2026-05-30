@@ -5,11 +5,14 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="노무길잡이">
+<meta name="apple-mobile-web-app-title" content="노무길잡이 · 사업장 노무가이드">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="theme-color" content="#b8922a">
-<title>노무길잡이</title>
+<title>노무길잡이 · 사업장 노무가이드</title>
+<meta property="og:title" content="노무길잡이 · 사업장 노무가이드">
+<meta property="og:description" content="의무사항 진단 · 급여계산 · 필수서식">
+<meta property="og:site_name" content="노무길잡이 · 사업장 노무가이드">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@700;900&display=swap" rel="stylesheet">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -33,7 +36,7 @@ function GovBadge(){
     <div style={{display:'flex',alignItems:'center',gap:5,flexShrink:0}}>
       <img src={GOV_BADGE} style={{width:22,height:22,flexShrink:0,objectFit:'contain',borderRadius:3}} alt=""/>
       <div style={{fontSize:11,fontWeight:700,color:'#7a8898',lineHeight:1.3,textAlign:'right',whiteSpace:'nowrap'}}>
-        
+        <span style={{display:'block'}}>대구지방고용노동청</span>
       </div>
     </div>
   );

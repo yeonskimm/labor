@@ -3318,8 +3318,127 @@ export default function App(){
   );
 }
 
+// ────────────────────────────────────────
+// 🔒 비밀번호 잠금 화면
+// ────────────────────────────────────────
+const CORRECT_PW = "1350"; // ← 비밀번호를 여기서 변경하세요
+
+function LockScreen({ onUnlock }) {
+  const [pw, setPw] = React.useState("");
+  const [error, setError] = React.useState(false);
+  const [shake, setShake] = React.useState(false);
+
+  const tryUnlock = () => {
+    if (pw === CORRECT_PW) {
+      onUnlock();
+    } else {
+      setError(true);
+      setShake(true);
+      setPw("");
+      setTimeout(() => setShake(false), 500);
+    }
+  };
+
+  return (
+    <div style={{
+      minHeight:"100vh", display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center",
+      background:"linear-gradient(160deg,#f6f9fd 0%,#edf2fb 100%)",
+      padding:"24px"
+    }}>
+      <style>{`
+        @keyframes shake {
+          0%,100%{transform:translateX(0)}
+          20%{transform:translateX(-8px)}
+          40%{transform:translateX(8px)}
+          60%{transform:translateX(-6px)}
+          80%{transform:translateX(6px)}
+        }
+        .shake { animation: shake 0.45s ease; }
+        .lock-input:focus { outline:none; border-color:#b8922a !important; box-shadow: 0 0 0 3px rgba(184,146,42,0.15) !important; }
+      `}</style>
+
+      {/* 로고 */}
+      <div style={{marginBottom:8}}>
+        <img src="icon-192.png" alt="노무길잡이" style={{width:80,height:80,borderRadius:"50%",boxShadow:"0 4px 20px rgba(0,0,0,0.12)"}} />
+      </div>
+      <div style={{fontSize:20,fontWeight:900,color:"#1a2236",marginBottom:4,letterSpacing:"-0.5px"}}>
+        노무길잡이
+      </div>
+      <div style={{fontSize:13,color:"#8a96a8",marginBottom:32}}>
+        대구지방고용노동청
+      </div>
+
+      {/* 잠금 카드 */}
+      <div className={shake ? "shake" : ""} style={{
+        background:"#fff", borderRadius:20, padding:"28px 28px 24px",
+        width:"100%", maxWidth:320,
+        boxShadow:"0 8px 32px rgba(30,50,90,0.10)",
+        border:"1.5px solid #e8edf6"
+      }}>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{fontSize:28,marginBottom:8}}>🔒</div>
+          <div style={{fontSize:15,fontWeight:800,color:"#1a2236"}}>비밀번호를 입력하세요</div>
+        </div>
+
+        <input
+          className="lock-input"
+          type="password"
+          value={pw}
+          onChange={e=>{ setPw(e.target.value); setError(false); }}
+          onKeyDown={e=>{ if(e.key==="Enter") tryUnlock(); }}
+          placeholder="비밀번호"
+          autoFocus
+          style={{
+            width:"100%", padding:"13px 16px",
+            fontSize:16, fontWeight:700, letterSpacing:4,
+            border:`1.5px solid ${error?"#e05050":"#dde8f5"}`,
+            borderRadius:12, background: error?"#fff8f8":"#f8faff",
+            color:"#1a2236", textAlign:"center",
+            fontFamily:"inherit", marginBottom:8,
+            transition:"all 0.2s"
+          }}
+        />
+
+        {error && (
+          <div style={{
+            textAlign:"center", fontSize:12, color:"#e05050",
+            fontWeight:700, marginBottom:10
+          }}>
+            ❌ 비밀번호가 틀렸습니다
+          </div>
+        )}
+
+        <button
+          onClick={tryUnlock}
+          style={{
+            width:"100%", padding:"13px",
+            background:"linear-gradient(135deg,#c9a030,#9a7520)",
+            color:"#fff", border:"none", borderRadius:12,
+            fontSize:15, fontWeight:800, cursor:"pointer",
+            fontFamily:"inherit", marginTop: error ? 0 : 4,
+            boxShadow:"0 3px 12px rgba(184,146,42,0.30)"
+          }}
+        >
+          입장하기
+        </button>
+      </div>
+
+      <div style={{marginTop:20,fontSize:11,color:"#b0bac8"}}>
+        문의: 고용노동부 ☎ 1350
+      </div>
+    </div>
+  );
+}
+
+function AppWithLock() {
+  const [unlocked, setUnlocked] = React.useState(false);
+  if (!unlocked) return <LockScreen onUnlock={() => setUnlocked(true)} />;
+  return <App />;
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+root.render(<AppWithLock />);
 </script>
 
 <!-- PWA Service Worker 등록 -->

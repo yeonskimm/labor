@@ -1,0 +1,26 @@
+{
+  "name": "노무길잡이 - 대구지방고용노동청",
+  "short_name": "노무길잡이",
+  "description": "의무사항 진단 · 급여계산 · 필수서식",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f9fd",
+  "theme_color": "#b8922a",
+  "orientation": "portrait",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

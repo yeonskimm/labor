@@ -2360,6 +2360,335 @@ function LawScreen({onBack,lang,setLang}){
 }
 
 
+/* ═══════════════════════════════════════
+   출퇴근 기록기 (근무일지 → 급여 자동계산)
+   - 기록은 이 기기(브라우저)에 저장됩니다.
+═══════════════════════════════════════ */
+const CLOCK_KEY="nomu_clock_v1";
+const pad2=n=>String(n).padStart(2,"0");
+const todayStr=()=>{const d=new Date();return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;};
+const nowHM=()=>{const d=new Date();return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;};
+const dotDate=s=>s?s.replace(/-/g,"."):"";
+const wdayKo=s=>{const d=new Date(s+"T00:00:00");return ["일","월","화","수","목","금","토"][d.getDay()];};
+function isoWeekKey(dateStr){
+  const d=new Date(dateStr+"T00:00:00");
+  const day=(d.getDay()+6)%7;
+  d.setDate(d.getDate()-day+3);
+  const firstThu=new Date(d.getFullYear(),0,4);
+  const week=1+Math.round(((d-firstThu)/86400000-3+((firstThu.getDay()+6)%7))/7);
+  return d.getFullYear()+"-W"+pad2(week);
+}
+function loadClock(){
+  try{const raw=localStorage.getItem(CLOCK_KEY);if(raw)return JSON.parse(raw);}catch(e){}
+  return {settings:{hourly:MIN_WAGE,sojeongH:8,is5plus:true},records:[]};
+}
+
+// 출퇴근 기록 전용: 실제 근무시간 그대로 반영 (소정은 연장 분리 기준으로만 사용)
+function calcAttend(inT,outT,sojeongH,hourly,is5plus,breakH=0,breakPaid=false){
+  const inM=toMin(inT); const outRaw=toMin(outT);
+  if(inM===null||outRaw===null) return null;
+  let outM=resolveEnd(inM,outRaw);
+  const effOut=outM-(breakPaid?0:breakH*60);
+  if(effOut<=inM) return {sojeongMin:0,otMin:0,nightMin:0,totalPay:0};
+  const sojBoundary=Math.min(inM+sojeongH*60, effOut);
+  const soj=calcSeg(inM,sojBoundary,hourly,1.0,is5plus);
+  const ot=effOut>sojBoundary?calcSeg(sojBoundary,effOut,hourly,1.5,is5plus):{min:0,nightMin:0,pay:0};
+  return {sojeongMin:soj.min,otMin:ot.min,nightMin:soj.nightMin+ot.nightMin,
+    totalPay:soj.pay+ot.pay};
+}
+
+function ClockScreen({onBack,lang,setLang}){
+  const init=loadClock();
+  const [hourly,setHourly]=useState(init.settings.hourly||MIN_WAGE);
+  const [sojeongH,setSojeongH]=useState(init.settings.sojeongH||8);
+  const [is5plus,setIs5plus]=useState(init.settings.is5plus!==false);
+  const [records,setRecords]=useState(init.records||[]);
+  const [showSetup,setShowSetup]=useState(false);
+  const [editId,setEditId]=useState(null);
+  const [draft,setDraft]=useState(null);
+
+  // 기기에 저장
+  React.useEffect(()=>{
+    try{localStorage.setItem(CLOCK_KEY,JSON.stringify({settings:{hourly,sojeongH,is5plus},records}));}catch(e){}
+  },[hourly,sojeongH,is5plus,records]);
+
+  const hw=Number(hourly)||0;
+  const sh=Number(sojeongH)||8;
+
+  // 근무 중(출근만 찍힌 기록)
+  const active=records.find(r=>r.in&&!r.out);
+
+  function clockIn(){
+    if(active)return;
+    const rec={id:Date.now(),date:todayStr(),in:nowHM(),out:null,breakH:0,breakPaid:false,note:""};
+    setRecords(rs=>[rec,...rs]);
+  }
+  function clockOut(){
+    if(!active)return;
+    setRecords(rs=>rs.map(r=>r.id===active.id?{...r,out:nowHM()}:r));
+  }
+  function delRec(id){setRecords(rs=>rs.filter(r=>r.id!==id));}
+  function startEdit(r){setEditId(r.id);setDraft({...r});}
+  function startAdd(){setEditId("new");setDraft({id:Date.now(),date:todayStr(),in:"09:00",out:"18:00",breakH:0,breakPaid:false,note:""});}
+  function saveEdit(){
+    if(!draft)return;
+    const d={...draft,breakH:Number(draft.breakH)||0};
+    if(editId==="new")setRecords(rs=>[d,...rs]);
+    else setRecords(rs=>rs.map(r=>r.id===editId?d:r));
+    setEditId(null);setDraft(null);
+  }
+
+  // 일별 계산 결과
+  const calc=useMemo(()=>{
+    const done=records.filter(r=>r.in&&r.out);
+    const per={};
+    done.forEach(r=>{
+      const res=calcAttend(r.in,r.out,sh,hw,is5plus,Number(r.breakH)||0,!!r.breakPaid);
+      if(res)per[r.id]=res;
+    });
+    // 주별 묶음 → 주휴수당
+    const weeks={};
+    done.forEach(r=>{
+      const res=per[r.id];if(!res)return;
+      const wk=isoWeekKey(r.date);
+      (weeks[wk]=weeks[wk]||{sojMin:0,pay:0,days:0}).sojMin+=res.sojeongMin;
+      weeks[wk].pay+=res.totalPay;weeks[wk].days++;
+    });
+    let juhyuTotal=0;const weekArr=[];
+    Object.keys(weeks).sort().forEach(wk=>{
+      const w=weeks[wk];
+      const has=w.sojMin>=15*60;
+      const jh=has?Math.min((w.sojMin/60)/40*8,8):0;
+      const jp=jh*hw;juhyuTotal+=jp;
+      weekArr.push({wk,...w,juhyuH:jh,juhyuPay:jp,total:w.pay+jp});
+    });
+    const workPay=done.reduce((s,r)=>s+(per[r.id]?per[r.id].totalPay:0),0);
+    // 이번 달
+    const ym=todayStr().slice(0,7);
+    const monthPay=done.filter(r=>r.date.slice(0,7)===ym)
+      .reduce((s,r)=>s+(per[r.id]?per[r.id].totalPay:0),0);
+    return {per,weekArr,juhyuTotal,workPay,grand:workPay+juhyuTotal,monthPay,doneCount:done.length};
+  },[records,hw,sh,is5plus]);
+
+  // 날짜별 그룹(최신순)
+  const byDate=useMemo(()=>{
+    const g={};
+    records.forEach(r=>{(g[r.date]=g[r.date]||[]).push(r);});
+    return Object.keys(g).sort().reverse().map(date=>({date,items:g[date]}));
+  },[records]);
+
+  const lowWage=hw>0&&hw<MIN_WAGE;
+
+  return(
+    <div style={{minHeight:"100vh",background:C.bg0,paddingBottom:40}}>
+      <SubHdr title={lang==="ko"?"🕐 출퇴근 기록":"🕐 Time Clock"} back={onBack} lang={lang} setLang={setLang}/>
+      <div style={{maxWidth:600,margin:"0 auto",padding:"14px 16px"}}>
+
+        {/* 설정 요약 */}
+        <div onClick={()=>setShowSetup(s=>!s)}
+          style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+            background:C.surface,border:`1px solid ${C.bdrD}`,borderRadius:11,
+            padding:"10px 14px",marginBottom:12,cursor:"pointer",
+            boxShadow:`0 1px 6px ${C.shadow}`}}>
+          <div style={{fontSize:12.5,color:C.txt2}}>
+            시급 <b style={{color:C.gold}}>{won(hw)}원</b>
+            <span style={{color:C.txt4}}> · </span>1일 소정 <b style={{color:C.txt1}}>{sh}h</b>
+            <span style={{color:C.txt4}}> · </span>{is5plus?"5인↑":"5인 미만"}
+          </div>
+          <span style={{fontSize:12,color:C.gold,fontWeight:700}}>{showSetup?"닫기 ▲":"설정 ▼"}</span>
+        </div>
+
+        {showSetup&&(
+          <div style={{background:C.surface,border:`1px solid ${C.bdrD}`,borderRadius:12,
+            padding:"14px",marginBottom:12,boxShadow:`0 2px 10px ${C.shadow}`}}>
+            <FLD label="시급(원)">
+              <input style={INP} type="number" inputMode="numeric" value={hourly}
+                onChange={e=>setHourly(e.target.value)} placeholder={String(MIN_WAGE)}/>
+              {lowWage&&<div style={{fontSize:11,color:C.red,marginTop:5,fontWeight:700}}>
+                ⚠ 2026 최저임금(10,320원)보다 낮습니다</div>}
+            </FLD>
+            <FLD label="1일 소정근로시간 (계약서상 약속한 시간)">
+              <div style={{display:"flex",gap:6,marginBottom:6}}>
+                {[4,6,8].map(v=>(
+                  <button key={v} onClick={()=>setSojeongH(v)}
+                    style={{flex:1,padding:"8px",borderRadius:8,fontFamily:"inherit",fontWeight:800,fontSize:13,cursor:"pointer",
+                      border:`1.5px solid ${sh===v?C.gold:C.bdrD}`,
+                      background:sh===v?"linear-gradient(145deg,#fdf8ec,#f8efda)":"#fff",
+                      color:sh===v?C.goldD:C.txt2}}>{v}h</button>
+                ))}
+                <input style={{...INP,flex:1,textAlign:"center"}} type="number" step="0.5" value={sojeongH}
+                  onChange={e=>setSojeongH(e.target.value)} placeholder="직접"/>
+              </div>
+            </FLD>
+            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.txt2,cursor:"pointer"}}>
+              <input type="checkbox" checked={is5plus} onChange={e=>setIs5plus(e.target.checked)}
+                style={{width:18,height:18,accentColor:C.gold}}/>
+              상시근로자 5인 이상 (연장·야간 가산수당 적용)
+            </label>
+          </div>
+        )}
+
+        {/* 출근/퇴근 메인 */}
+        {active?(
+          <div style={{background:"linear-gradient(160deg,#edfaf4,#e0f5ea)",
+            border:`1.5px solid rgba(45,168,112,0.3)`,borderRadius:16,padding:"18px",marginBottom:14,
+            textAlign:"center",boxShadow:"0 4px 18px rgba(45,168,112,0.15)"}}>
+            <div style={{fontSize:13,color:C.green,fontWeight:800,marginBottom:4}}>● 근무 중</div>
+            <div style={{fontSize:14,color:"#155a38"}}>
+              {dotDate(active.date)}({wdayKo(active.date)}) <b>{active.in}</b> 출근
+            </div>
+            <button onClick={clockOut}
+              style={{marginTop:12,width:"100%",border:"none",borderRadius:13,padding:"16px",
+                fontSize:17,fontWeight:800,cursor:"pointer",fontFamily:"inherit",color:"#fff",
+                background:"linear-gradient(160deg,#d04040,#b83232)",
+                boxShadow:"0 4px 16px rgba(208,64,64,0.35)"}}>
+              🔴 퇴근 기록 ({nowHM()} 기준)
+            </button>
+          </div>
+        ):(
+          <button onClick={clockIn}
+            style={{width:"100%",border:"none",borderRadius:16,padding:"22px",marginBottom:14,
+              fontSize:19,fontWeight:800,cursor:"pointer",fontFamily:"inherit",color:"#fff8ec",
+              background:"linear-gradient(160deg,#3ab87a 0%,#2da870 55%,#1f9560 100%)",
+              boxShadow:"0 6px 24px rgba(45,168,112,0.38),0 1px 0 rgba(255,255,255,0.2) inset"}}>
+            🟢 출근 기록 시작
+            <div style={{fontSize:12,fontWeight:600,opacity:0.85,marginTop:4}}>
+              지금 시각({nowHM()})으로 기록됩니다
+            </div>
+          </button>
+        )}
+
+        {/* 급여 요약 */}
+        {calc.doneCount>0&&(
+          <div style={{background:C.surface,border:`1px solid ${C.bdr}`,borderRadius:14,
+            padding:"16px",marginBottom:14,boxShadow:`0 2px 12px ${C.shadow}`}}>
+            <div style={{fontSize:12,fontWeight:800,color:C.txt3,letterSpacing:"0.5px",
+              textTransform:"uppercase",marginBottom:10}}>자동 급여 계산</div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:C.txt2,marginBottom:6}}>
+              <span>근무 {calc.doneCount}일 임금(연장·야간 포함)</span><b style={{color:C.txt1}}>{won(calc.workPay)}원</b>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:C.txt2,marginBottom:10}}>
+              <span>주휴수당</span><b style={{color:C.txt1}}>{won(calc.juhyuTotal)}원</b>
+            </div>
+            <div style={{height:1,background:C.bdrD,margin:"4px 0 10px"}}/>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+              <span style={{fontSize:13,fontWeight:800,color:C.goldD}}>누적 받을 금액</span>
+              <b style={{fontSize:21,color:C.gold,fontWeight:900}}>{won(calc.grand)}원</b>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.txt3,marginTop:8,
+              background:C.bg1,borderRadius:8,padding:"8px 10px"}}>
+              <span>이번 달({todayStr().slice(0,7).replace("-",".")}) 임금</span>
+              <b style={{color:C.txt2}}>{won(calc.monthPay)}원</b>
+            </div>
+            <div style={{fontSize:11,color:C.txt4,marginTop:10,lineHeight:1.6}}>
+              ※ 주휴수당은 주 소정 15시간 이상·개근 시 발생합니다. 실제 지급액은 4대보험·세금 공제 전 금액이며 참고용입니다.
+            </div>
+          </div>
+        )}
+
+        {/* 근무일지 */}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+          <div style={{fontSize:14,fontWeight:800,color:C.txt1}}>📒 근무일지</div>
+          <button onClick={startAdd}
+            style={{background:"linear-gradient(135deg,#f0f6ff,#e8f0fa)",border:`1.5px solid ${C.bdrD}`,
+              color:C.txt2,borderRadius:9,padding:"6px 12px",fontSize:12,fontWeight:700,
+              cursor:"pointer",fontFamily:"inherit"}}>＋ 직접 추가</button>
+        </div>
+
+        {byDate.length===0&&(
+          <div style={{textAlign:"center",color:C.txt4,fontSize:13,padding:"30px 0"}}>
+            아직 기록이 없습니다.<br/>위 <b style={{color:C.green}}>출근 기록</b> 버튼을 눌러 시작하세요.
+          </div>
+        )}
+
+        {byDate.map(g=>(
+          <div key={g.date} style={{marginBottom:10}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.txt3,margin:"4px 2px 6px"}}>
+              {dotDate(g.date)} ({wdayKo(g.date)})
+            </div>
+            {g.items.map(r=>{
+              const res=calc.per[r.id];
+              const otM=res?res.otMin:0,niM=res?res.nightMin:0;
+              return(
+                <div key={r.id} style={{background:C.surface,border:`1px solid ${C.bdrD}`,borderRadius:11,
+                  padding:"11px 13px",marginBottom:6,boxShadow:`0 1px 5px ${C.shadow}`}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div style={{fontSize:14,color:C.txt1,fontWeight:700}}>
+                      {r.in||"––:––"} ~ {r.out||<span style={{color:C.green}}>근무중</span>}
+                      {r.breakH>0&&<span style={{fontSize:11,color:C.txt3,fontWeight:500}}> (휴게 {r.breakH}h{r.breakPaid?"·유급":""})</span>}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>startEdit(r)} style={{background:"none",border:"none",color:C.txt3,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>수정</button>
+                      <button onClick={()=>delRec(r.id)} style={{background:"none",border:"none",color:C.red,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>삭제</button>
+                    </div>
+                  </div>
+                  {res&&(
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:6}}>
+                      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                        <span style={{fontSize:11,color:C.txt2,background:C.bg1,borderRadius:6,padding:"2px 7px"}}>
+                          {fmtH(res.sojeongMin+res.otMin)}
+                        </span>
+                        {otM>0&&<span style={{fontSize:11,color:C.purple,background:"#f4f0ff",borderRadius:6,padding:"2px 7px"}}>연장 {fmtH(otM)}</span>}
+                        {niM>0&&<span style={{fontSize:11,color:"#2a5a9a",background:"#eaf2fb",borderRadius:6,padding:"2px 7px"}}>야간 {fmtH(niM)}</span>}
+                      </div>
+                      <b style={{fontSize:14,color:C.gold}}>{won(res.totalPay)}원</b>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+
+      {/* 수정/추가 모달 */}
+      {draft&&(
+        <div onClick={()=>{setEditId(null);setDraft(null);}}
+          style={{position:"fixed",inset:0,background:"rgba(20,30,50,0.45)",zIndex:50,
+            display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{background:C.surface,borderRadius:"18px 18px 0 0",padding:"20px 18px 28px",
+              width:"100%",maxWidth:600,boxShadow:"0 -4px 24px rgba(20,30,50,0.2)"}}>
+            <div style={{fontSize:15,fontWeight:800,color:C.txt1,marginBottom:14}}>
+              {editId==="new"?"기록 직접 추가":"기록 수정"}
+            </div>
+            <FLD label="날짜">
+              <input style={INP} type="date" value={draft.date}
+                onChange={e=>setDraft(d=>({...d,date:e.target.value}))}/>
+            </FLD>
+            <div style={R2}>
+              <FLD label="출근"><input style={INP} type="time" value={draft.in||""}
+                onChange={e=>setDraft(d=>({...d,in:e.target.value}))}/></FLD>
+              <FLD label="퇴근"><input style={INP} type="time" value={draft.out||""}
+                onChange={e=>setDraft(d=>({...d,out:e.target.value}))}/></FLD>
+            </div>
+            <FLD label="휴게시간(시간)">
+              <input style={INP} type="number" step="0.5" value={draft.breakH}
+                onChange={e=>setDraft(d=>({...d,breakH:e.target.value}))} placeholder="예) 1"/>
+            </FLD>
+            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.txt2,cursor:"pointer",marginBottom:16}}>
+              <input type="checkbox" checked={!!draft.breakPaid}
+                onChange={e=>setDraft(d=>({...d,breakPaid:e.target.checked}))}
+                style={{width:18,height:18,accentColor:C.gold}}/>
+              휴게시간 유급(임금에 포함)
+            </label>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{setEditId(null);setDraft(null);}}
+                style={{flex:1,padding:"13px",borderRadius:11,border:`1.5px solid ${C.bdrD}`,
+                  background:"#fff",color:C.txt2,fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>취소</button>
+              <button onClick={saveEdit}
+                style={{flex:2,padding:"13px",borderRadius:11,border:"none",
+                  background:"linear-gradient(160deg,#d4a83c,#b8922a)",color:"#fff8ec",
+                  fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>저장</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function App(){
   // 화면: home | contract | calc | law
   const [screen, setScreen] = useState("home");
@@ -2514,6 +2843,20 @@ export default function App(){
             <span style={{marginLeft:'auto',opacity:0.7,fontSize:14}}>→</span>
           </button>
 
+          {/* 출퇴근 기록 - 근로자용 */}
+          <button onClick={()=>setScreen('clock')}
+            style={{width:'100%',border:'none',
+              background:'linear-gradient(160deg,#3ab87a 0%,#2da870 55%,#1f9560 100%)',
+              color:'#fff8ec',borderRadius:16,padding:'15px 24px',fontSize:16,fontWeight:800,
+              cursor:'pointer',fontFamily:'inherit',
+              boxShadow:'0 6px 22px rgba(45,168,112,0.34),0 1px 0 rgba(255,255,255,0.2) inset',
+              letterSpacing:'0.2px',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+            <span style={{fontSize:18}}>🕐</span>
+            <span>{lang==='ko'?'출퇴근 기록':'Time Clock'}</span>
+            <span style={{fontSize:11,fontWeight:600,opacity:0.85,marginLeft:4}}>기록→급여 자동계산</span>
+            <span style={{marginLeft:'auto',opacity:0.7,fontSize:14}}>→</span>
+          </button>
+
           {/* 구분 라인 */}
           {/* 위: 계산기류 */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginTop:2}}>
@@ -2600,6 +2943,7 @@ export default function App(){
   );
     /* ── 의무 길잡이 ── */
   if(screen==="law") return <LawScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang}/>;
+  if(screen==="clock") return <ClockScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang}/>;
 
   if(screen==="retirement") return <RetirementScreen onBack={()=>setScreen("home")} lang={lang} setLang={setLang}/>;
 

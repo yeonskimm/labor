@@ -2387,9 +2387,10 @@ function loadClock(){
 function calcAttend(inT,outT,sojeongH,hourly,is5plus,breakH=0,breakPaid=false){
   const inM=toMin(inT); const outRaw=toMin(outT);
   if(inM===null||outRaw===null) return null;
-  let outM=resolveEnd(inM,outRaw);
+  // 출근=퇴근(같은 시각)은 0분으로 처리. 퇴근<출근일 때만 야간(다음날)로 간주
+  let outM = outRaw===inM ? inM : resolveEnd(inM,outRaw);
   const effOut=outM-(breakPaid?0:breakH*60);
-  if(effOut<=inM) return {sojeongMin:0,otMin:0,nightMin:0,totalPay:0};
+  if(effOut<=inM) return {sojeongMin:0,otMin:0,nightMin:0,totalPay:0,zero:true};
   const sojBoundary=Math.min(inM+sojeongH*60, effOut);
   const soj=calcSeg(inM,sojBoundary,hourly,1.0,is5plus);
   const ot=effOut>sojBoundary?calcSeg(sojBoundary,effOut,hourly,1.5,is5plus):{min:0,nightMin:0,pay:0};
@@ -2446,9 +2447,11 @@ function ClockScreen({onBack,lang,setLang}){
       const res=calcAttend(r.in,r.out,sh,hw,is5plus,Number(r.breakH)||0,!!r.breakPaid);
       if(res)per[r.id]=res;
     });
+    // 유효 근무(0분 제외)
+    const valid=done.filter(r=>per[r.id]&&!per[r.id].zero);
     // 주별 묶음 → 주휴수당
     const weeks={};
-    done.forEach(r=>{
+    valid.forEach(r=>{
       const res=per[r.id];if(!res)return;
       const wk=isoWeekKey(r.date);
       (weeks[wk]=weeks[wk]||{sojMin:0,pay:0,days:0}).sojMin+=res.sojeongMin;
@@ -2462,12 +2465,12 @@ function ClockScreen({onBack,lang,setLang}){
       const jp=jh*hw;juhyuTotal+=jp;
       weekArr.push({wk,...w,juhyuH:jh,juhyuPay:jp,total:w.pay+jp});
     });
-    const workPay=done.reduce((s,r)=>s+(per[r.id]?per[r.id].totalPay:0),0);
+    const workPay=valid.reduce((s,r)=>s+per[r.id].totalPay,0);
     // 이번 달
     const ym=todayStr().slice(0,7);
-    const monthPay=done.filter(r=>r.date.slice(0,7)===ym)
-      .reduce((s,r)=>s+(per[r.id]?per[r.id].totalPay:0),0);
-    return {per,weekArr,juhyuTotal,workPay,grand:workPay+juhyuTotal,monthPay,doneCount:done.length};
+    const monthPay=valid.filter(r=>r.date.slice(0,7)===ym)
+      .reduce((s,r)=>s+per[r.id].totalPay,0);
+    return {per,weekArr,juhyuTotal,workPay,grand:workPay+juhyuTotal,monthPay,doneCount:valid.length};
   },[records,hw,sh,is5plus]);
 
   // 날짜별 그룹(최신순)
@@ -2508,17 +2511,28 @@ function ClockScreen({onBack,lang,setLang}){
                 ⚠ 2026 최저임금(10,320원)보다 낮습니다</div>}
             </FLD>
             <FLD label="1일 소정근로시간 (계약서상 약속한 시간)">
-              <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <div style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}>
                 {[4,6,8].map(v=>(
                   <button key={v} onClick={()=>setSojeongH(v)}
                     style={{flex:1,padding:"8px",borderRadius:8,fontFamily:"inherit",fontWeight:800,fontSize:13,cursor:"pointer",
-                      border:`1.5px solid ${sh===v?C.gold:C.bdrD}`,
-                      background:sh===v?"linear-gradient(145deg,#fdf8ec,#f8efda)":"#fff",
-                      color:sh===v?C.goldD:C.txt2}}>{v}h</button>
+                      border:`1.5px solid ${Number(sh)===v?C.gold:C.bdrD}`,
+                      background:Number(sh)===v?"linear-gradient(145deg,#fdf8ec,#f8efda)":"#fff",
+                      color:Number(sh)===v?C.goldD:C.txt2}}>{v}h</button>
                 ))}
-                <input style={{...INP,flex:1,textAlign:"center"}} type="number" step="0.5" value={sojeongH}
-                  onChange={e=>setSojeongH(e.target.value)} placeholder="직접"/>
+                <span style={{fontSize:12,color:C.txt4,fontWeight:700,padding:"0 2px"}}>또는</span>
+                <div style={{flex:1.1,position:"relative"}}>
+                  <input
+                    style={{...INP,textAlign:"center",paddingRight:24,
+                      border:`1.5px dashed ${[4,6,8].includes(Number(sh))?C.bdrD:C.gold}`,
+                      background:[4,6,8].includes(Number(sh))?"#fff":"#fdf8ec"}}
+                    type="number" step="0.5" inputMode="decimal"
+                    value={[4,6,8].includes(Number(sojeongH))?"":sojeongH}
+                    onChange={e=>setSojeongH(e.target.value)} placeholder="직접"/>
+                  <span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",
+                    fontSize:12,color:C.txt4,pointerEvents:"none"}}>h</span>
+                </div>
               </div>
+              <div style={{fontSize:11,color:C.txt4}}>예: 7.5시간이면 직접칸에 7.5 입력</div>
             </FLD>
             <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.txt2,cursor:"pointer"}}>
               <input type="checkbox" checked={is5plus} onChange={e=>setIs5plus(e.target.checked)}
@@ -2622,7 +2636,12 @@ function ClockScreen({onBack,lang,setLang}){
                       <button onClick={()=>delRec(r.id)} style={{background:"none",border:"none",color:C.red,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>삭제</button>
                     </div>
                   </div>
-                  {res&&(
+                  {res&&res.zero&&(
+                    <div style={{fontSize:11.5,color:C.red,fontWeight:700,marginTop:6}}>
+                      ⚠ 출근·퇴근 시각이 같습니다 — <span style={{textDecoration:"underline",cursor:"pointer"}} onClick={()=>startEdit(r)}>퇴근시각 수정</span>
+                    </div>
+                  )}
+                  {res&&!res.zero&&(
                     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:6}}>
                       <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
                         <span style={{fontSize:11,color:C.txt2,background:C.bg1,borderRadius:6,padding:"2px 7px"}}>

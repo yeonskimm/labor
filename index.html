@@ -352,7 +352,8 @@ function WorkplaceSetup({ user, onDone }) {
   const create = async () => {
     if (!name.trim()) { setError('사업장명을 입력해주세요'); return; }
     setLoading(true);
-    const code = await sb.rpc('generate_invite_code').then(r => r.data);
+    const code = Math.random().toString(36).substring(2,5).toUpperCase() + '-' +
+      String(Math.floor(Math.random()*9000+1000));
     const { data, error: e } = await sb.from('workplaces').insert({
       name: name.trim(),
       owner_id: user.id,

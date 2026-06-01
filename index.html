@@ -31,7 +31,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 ============================================================ */
 const SUPA_URL = 'https://dfwuhodjxeimcbxdgalv.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmd3Vob2RqeGVpbWNieGRnYWx2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAyODkxMjEsImV4cCI6MjA5NTg2NTEyMX0.AGATpLbJOLxOfESUju8mkUahWr1BuIhHTezN63ZO3jI';
-const sb = supabase.createClient(SUPA_URL, SUPA_KEY);
+const sb = window.supabase.createClient(SUPA_URL, SUPA_KEY);
 
 /* ============================================================
    디자인 토큰

@@ -2439,6 +2439,97 @@ function ClockScreen({onBack,lang,setLang}){
     setEditId(null);setDraft(null);
   }
 
+  // 근무일지 PDF 출력 (기존 계약서와 동일 방식)
+  function exportPDF(){
+    const done=records.filter(r=>r.in&&r.out)
+      .slice().sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+    const rows=done.map(r=>{
+      const res=calcAttend(r.in,r.out,sh,hw,is5plus,Number(r.breakH)||0,!!r.breakPaid);
+      if(!res||res.zero) return "";
+      return `<tr>
+        <td>${dotDate(r.date)}(${wdayKo(r.date)})</td>
+        <td style="text-align:center">${r.in}~${r.out}</td>
+        <td style="text-align:center">${r.breakH>0?r.breakH+"h"+(r.breakPaid?"(유급)":""):"-"}</td>
+        <td style="text-align:center">${fmtH(res.sojeongMin+res.otMin)}</td>
+        <td style="text-align:center">${res.otMin>0?fmtH(res.otMin):"-"}</td>
+        <td style="text-align:center">${res.nightMin>0?fmtH(res.nightMin):"-"}</td>
+        <td style="text-align:right">${won(res.totalPay)}원</td></tr>`;
+    }).join("");
+    const c=calc;
+    const html=`<!DOCTYPE html><html><head><meta charset="utf-8">
+      <style>
+      @page{size:A4 portrait;margin:14mm}@media print{html,body{-webkit-print-color-adjust:exact}}
+      *{font-family:'Malgun Gothic','맑은 고딕',sans-serif;box-sizing:border-box}
+      body{color:#1a2236;font-size:12px}
+      h1{font-size:20px;color:#8c6e29;margin:0 0 4px}
+      .sub{color:#5a6273;font-size:11px;margin-bottom:14px}
+      .meta{font-size:11.5px;margin-bottom:10px;color:#333}
+      .meta b{color:#1a2236}
+      table{width:100%;border-collapse:collapse;font-size:11px}
+      th{background:#1f2a44;color:#fff;padding:7px 6px;border:1px solid #c9ccd6}
+      td{padding:6px;border:1px solid #d6dae3}
+      tr:nth-child(even) td{background:#f7f8fb}
+      .sum{margin-top:14px;border-top:2px solid #8c6e29;padding-top:10px;font-size:13px}
+      .sum .g{font-size:17px;font-weight:900;color:#8c6e29}
+      .foot{margin-top:16px;font-size:10px;color:#8a96a8;line-height:1.6}
+      </style></head><body>
+      <h1>근무일지</h1>
+      <div class="sub">노무길잡이 · 대구지방고용노동청 광역산재예방감독과</div>
+      <div class="meta">출력일: ${dotDate(todayStr())} &nbsp;|&nbsp; 적용 시급: <b>${won(hw)}원</b> &nbsp;|&nbsp; 1일 소정: <b>${sh}시간</b> &nbsp;|&nbsp; ${is5plus?"상시 5인 이상":"5인 미만"}</div>
+      <table><thead><tr>
+        <th>날짜</th><th>출퇴근</th><th>휴게</th><th>근로시간</th><th>연장</th><th>야간</th><th>임금</th>
+      </tr></thead><tbody>${rows||'<tr><td colspan="7" style="text-align:center;color:#999">기록 없음</td></tr>'}</tbody></table>
+      <div class="sum">
+        근무 ${c.doneCount}일 임금: <b>${won(c.workPay)}원</b> &nbsp; + &nbsp; 주휴수당: <b>${won(c.juhyuTotal)}원</b><br/>
+        누적 받을 금액: <span class="g">${won(c.grand)}원</span>
+      </div>
+      <div class="foot">
+        ※ 본 근무일지는 근로자 본인이 기록한 자료이며, 임금은 4대보험·세금 공제 전 금액으로 참고용입니다.<br/>
+        ※ 연장·야간 가산수당은 상시 5인 이상 사업장 기준입니다. 노무 상담: 고용노동부 고객상담센터 ☎ 1350
+      </div>
+      </body></html>`;
+    const w=window.open("","_blank");
+    if(!w){alert("팝업이 차단되었습니다. 팝업을 허용해 주세요.");return;}
+    w.document.write(html); w.document.close();
+    setTimeout(()=>{w.focus();w.print();},600);
+  }
+
+  // 데이터 백업파일 내보내기 (.json)
+  function exportBackup(){
+    const data={app:"노무길잡이-출퇴근",version:1,exportedAt:new Date().toISOString(),
+      settings:{hourly:hw,sojeongH:sh,is5plus},records};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url; a.download=`근무일지백업_${todayStr()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+
+  // 백업파일 복원
+  const fileRef=useRef(null);
+  function importBackup(e){
+    const file=e.target.files&&e.target.files[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=()=>{
+      try{
+        const data=JSON.parse(reader.result);
+        if(!data.records||!Array.isArray(data.records)) throw new Error("형식 오류");
+        if(!confirm(`백업 ${data.records.length}건을 불러옵니다. 현재 기록은 대체됩니다. 계속할까요?`)) return;
+        if(data.settings){
+          if(data.settings.hourly)setHourly(data.settings.hourly);
+          if(data.settings.sojeongH)setSojeongH(data.settings.sojeongH);
+          if(typeof data.settings.is5plus==="boolean")setIs5plus(data.settings.is5plus);
+        }
+        setRecords(data.records);
+        alert("복원되었습니다.");
+      }catch(err){alert("이 파일을 읽을 수 없습니다. 올바른 백업파일인지 확인해 주세요.");}
+      finally{ if(fileRef.current) fileRef.current.value=""; }
+    };
+    reader.readAsText(file);
+  }
+
   // 일별 계산 결과
   const calc=useMemo(()=>{
     const done=records.filter(r=>r.in&&r.out);
@@ -2658,6 +2749,38 @@ function ClockScreen({onBack,lang,setLang}){
             })}
           </div>
         ))}
+
+        {/* 내보내기 · 백업 */}
+        <div style={{marginTop:18,padding:"14px",background:C.surface,
+          border:`1px solid ${C.bdrD}`,borderRadius:12,boxShadow:`0 1px 6px ${C.shadow}`}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.txt3,letterSpacing:"0.5px",
+            textTransform:"uppercase",marginBottom:10}}>내보내기 · 백업</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <button onClick={exportPDF} disabled={calc.doneCount===0}
+              style={{padding:"12px",borderRadius:10,border:`1.5px solid ${C.bdr}`,cursor:calc.doneCount===0?"default":"pointer",
+                fontFamily:"inherit",fontWeight:800,fontSize:13,opacity:calc.doneCount===0?0.45:1,
+                background:"linear-gradient(145deg,#fdf8ec,#f8efda)",color:C.goldD}}>
+              🖨 근무일지 PDF
+            </button>
+            <button onClick={exportBackup} disabled={records.length===0}
+              style={{padding:"12px",borderRadius:10,border:`1.5px solid ${C.bdrD}`,cursor:records.length===0?"default":"pointer",
+                fontFamily:"inherit",fontWeight:800,fontSize:13,opacity:records.length===0?0.45:1,
+                background:"linear-gradient(145deg,#f0f6ff,#e8f0fa)",color:"#2a3a52"}}>
+              💾 백업파일 저장
+            </button>
+          </div>
+          <button onClick={()=>fileRef.current&&fileRef.current.click()}
+            style={{width:"100%",padding:"11px",borderRadius:10,border:`1.5px dashed ${C.bdrD}`,
+              background:"#fff",color:C.txt2,fontFamily:"inherit",fontWeight:700,fontSize:12.5,cursor:"pointer"}}>
+            📂 백업파일 불러오기 (기기 변경·복원 시)
+          </button>
+          <input ref={fileRef} type="file" accept="application/json,.json"
+            onChange={importBackup} style={{display:"none"}}/>
+          <div style={{fontSize:11,color:C.txt4,marginTop:10,lineHeight:1.6}}>
+            ※ 기록은 이 기기에만 저장됩니다. 기기를 바꾸거나 브라우저 기록을 지우기 전에
+            <b style={{color:C.txt3}}> 백업파일 저장</b>으로 내려받아 두면 안전하게 옮길 수 있어요.
+          </div>
+        </div>
       </div>
 
       {/* 수정/추가 모달 */}

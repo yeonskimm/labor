@@ -720,6 +720,7 @@ function SimulateWorkerInput({ data, selectedDate, onSubmit, onCancel }) {
 function PayrollTab({ data }) {
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   const [selectedWorker, setSelectedWorker] = useState(null);
+  const [showPayslip, setShowPayslip] = useState(false);
 
   // 월별 집계
   const calcWorkerPay = (worker) => {
@@ -815,10 +816,19 @@ function PayrollTab({ data }) {
             );
           })()}
 
-          <Btn style={{ width: '100%' }} size="lg" onClick={() => alert('실제 앱에서는 PDF 명세서가 출력됩니다')}>
-            📄 급여명세서 PDF 출력
+          <Btn style={{ width: '100%' }} size="lg" onClick={() => setShowPayslip(true)}>
+            📄 임금명세서 보기 / 인쇄
           </Btn>
         </div>
+        {showPayslip && (
+          <Payslip
+            worker={selectedWorker}
+            pay={pay}
+            month={selectedMonth}
+            bizName={data.bizName}
+            onClose={() => setShowPayslip(false)}
+          />
+        )}
       </div>
     );
   }
@@ -878,6 +888,258 @@ function PayRow({ label, detail, value }) {
         {value.toLocaleString()}원
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   임금명세서 (근기법 §48 양식)
+   - 모달 전체화면, 인쇄 가능
+============================================================ */
+function Payslip({ worker, pay, month, bizName, onClose }) {
+  // 공제 계산 (4대보험 + 소득세 간이)
+  const gross = pay.total;
+  const NPS = Math.round(gross * 0.045);        // 국민연금 4.5%
+  const HI = Math.round(gross * 0.03545);       // 건강보험 3.545%
+  const LTC = Math.round(HI * 0.1295);          // 장기요양 (건보의 12.95%)
+  const EI = Math.round(gross * 0.009);         // 고용보험 0.9%
+  const incomeTax = gross < 1060000 ? 0 : Math.round(gross * 0.013); // 간이세액
+  const localTax = Math.round(incomeTax * 0.1); // 지방소득세
+  const deductTotal = NPS + HI + LTC + EI + incomeTax + localTax;
+  const netPay = gross - deductTotal;
+
+  const [y, m] = month.split('-');
+  const payDate = `${y}년 ${parseInt(m)+1}월 10일`; // 다음달 10일 지급 가정
+
+  const handlePrint = () => {
+    const printWindow = window.open('', '_blank', 'width=800,height=900');
+    const content = document.getElementById('payslip-print').innerHTML;
+    printWindow.document.write(`
+      <!DOCTYPE html><html><head><meta charset="UTF-8"><title>임금명세서_${worker.name}_${month}</title>
+      <style>
+        @page { size: A4; margin: 15mm; }
+        body { font-family: 'Malgun Gothic', sans-serif; color: #2a3142; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #444; padding: 6px 8px; font-size: 11px; }
+        th { background: #f0e8d0; font-weight: 700; }
+        h1 { text-align: center; font-size: 18px; margin: 0 0 16px; }
+        .meta { margin-bottom: 10px; font-size: 11px; }
+        .total-row { background: #fffbeb; font-weight: 700; }
+        .net-row { background: #b8922a; color: #fff; font-weight: 700; font-size: 13px; }
+        .right { text-align: right; }
+        .center { text-align: center; }
+        .small { font-size: 9px; color: #666; }
+      </style></head><body>${content}</body></html>
+    `);
+    printWindow.document.close();
+    setTimeout(() => { printWindow.print(); }, 300);
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0,0,0,0.5)', zIndex: 200,
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+      overflow: 'auto', padding: '20px 10px'
+    }} onClick={onClose}>
+      <div style={{
+        background: '#fff', borderRadius: 12,
+        maxWidth: 560, width: '100%',
+        boxShadow: '0 8px 40px rgba(0,0,0,0.3)'
+      }} onClick={e => e.stopPropagation()}>
+        {/* 상단 액션 바 */}
+        <div style={{
+          display: 'flex', gap: 8, padding: 12,
+          borderBottom: `1px solid ${C.border}`,
+          position: 'sticky', top: 0, background: '#fff', zIndex: 1,
+          borderTopLeftRadius: 12, borderTopRightRadius: 12
+        }}>
+          <Btn variant="secondary" onClick={onClose} size="sm">✕ 닫기</Btn>
+          <div style={{ flex: 1 }} />
+          <Btn onClick={handlePrint} size="sm">🖨️ 인쇄 / PDF</Btn>
+        </div>
+
+        {/* 명세서 본문 (인쇄용 ID) */}
+        <div id="payslip-print" style={{ padding: '20px 16px' }}>
+          <h1 style={{ textAlign: 'center', fontSize: 18, fontWeight: 900,
+                       color: C.t1, marginBottom: 6 }}>
+            임 금 명 세 서
+          </h1>
+          <div style={{ textAlign: 'center', fontSize: 10, color: C.t3, marginBottom: 14 }}>
+            근로기준법 제48조 제2항 / 시행령 제27조의2
+          </div>
+
+          {/* 사업장·근로자 정보 */}
+          <div className="meta" style={{ fontSize: 11, color: C.t2, marginBottom: 10, lineHeight: 1.8 }}>
+            <div><strong>사업장명:</strong> {bizName}</div>
+            <div><strong>지급일:</strong> {payDate}</div>
+            <div><strong>임금 산정기간:</strong> {y}.{m}.01 ~ {y}.{m}.{new Date(y, m, 0).getDate()}</div>
+          </div>
+
+          {/* 인적사항 */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 12, fontSize: 11 }}>
+            <tbody>
+              <tr>
+                <th style={thS}>성명</th>
+                <td style={tdS}>{worker.name}</td>
+                <th style={thS}>생년월일</th>
+                <td style={tdS}>{worker.birth || '-'}</td>
+              </tr>
+              <tr>
+                <th style={thS}>입사일</th>
+                <td style={tdS}>{worker.joinDate}</td>
+                <th style={thS}>고용형태</th>
+                <td style={tdS}>{worker.type}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* 지급 내역 */}
+          <div style={{ fontWeight: 800, fontSize: 12, marginBottom: 6, color: C.t1 }}>
+            ① 지급 항목
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
+            <thead>
+              <tr>
+                <th style={thS}>항목</th>
+                <th style={thS}>계산방법 (산정 기초)</th>
+                <th style={{...thS, textAlign:'right'}}>금액 (원)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={tdS}>기본급</td>
+                <td style={{...tdS, fontSize: 10}}>
+                  소정근로 {pay.sojeongTotal}h × {worker.hourly.toLocaleString()}원
+                </td>
+                <td style={{...tdS, textAlign: 'right'}}>{pay.basePay.toLocaleString()}</td>
+              </tr>
+              {pay.overtimePay > 0 && (
+                <tr>
+                  <td style={tdS}>연장근로수당</td>
+                  <td style={{...tdS, fontSize: 10}}>
+                    연장 {pay.overtimeTotal}h × {worker.hourly.toLocaleString()}원 × 1.5
+                  </td>
+                  <td style={{...tdS, textAlign: 'right'}}>{pay.overtimePay.toLocaleString()}</td>
+                </tr>
+              )}
+              {pay.weeklyHoliday > 0 && (
+                <tr>
+                  <td style={tdS}>주휴수당</td>
+                  <td style={{...tdS, fontSize: 10}}>
+                    주 소정 15h↑ 개근 (근기법 §55)
+                  </td>
+                  <td style={{...tdS, textAlign: 'right'}}>{pay.weeklyHoliday.toLocaleString()}</td>
+                </tr>
+              )}
+              <tr style={{ background: '#fffbeb', fontWeight: 700 }}>
+                <td style={tdS} colSpan={2}>지급 합계 (A)</td>
+                <td style={{...tdS, textAlign: 'right', color: C.goldD}}>
+                  {gross.toLocaleString()}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* 공제 내역 */}
+          <div style={{ fontWeight: 800, fontSize: 12, marginBottom: 6, color: C.t1 }}>
+            ② 공제 항목
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
+            <thead>
+              <tr>
+                <th style={thS}>항목</th>
+                <th style={thS}>요율</th>
+                <th style={{...thS, textAlign:'right'}}>금액 (원)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <DeductRow label="국민연금" rate="4.5%" value={NPS} />
+              <DeductRow label="건강보험" rate="3.545%" value={HI} />
+              <DeductRow label="장기요양보험" rate="건보의 12.95%" value={LTC} />
+              <DeductRow label="고용보험" rate="0.9%" value={EI} />
+              <DeductRow label="소득세" rate="간이세액표" value={incomeTax} />
+              <DeductRow label="지방소득세" rate="소득세의 10%" value={localTax} />
+              <tr style={{ background: '#fff5f5', fontWeight: 700 }}>
+                <td style={tdS} colSpan={2}>공제 합계 (B)</td>
+                <td style={{...tdS, textAlign: 'right', color: C.red}}>
+                  {deductTotal.toLocaleString()}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* 실지급액 */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14 }}>
+            <tbody>
+              <tr style={{ background: C.gold, color: '#fff' }}>
+                <td style={{...tdS, fontWeight: 800, fontSize: 13, borderColor: C.goldD}}>
+                  실 지급액 (A - B)
+                </td>
+                <td style={{...tdS, textAlign: 'right', fontWeight: 900,
+                             fontSize: 15, borderColor: C.goldD}}>
+                  {netPay.toLocaleString()} 원
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* 근로시간 정보 */}
+          <div style={{ fontWeight: 800, fontSize: 12, marginBottom: 6, color: C.t1 }}>
+            ③ 근로시간 내역
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14, fontSize: 11 }}>
+            <tbody>
+              <tr>
+                <th style={thS}>근무일수</th>
+                <td style={tdS}>{pay.days}일</td>
+                <th style={thS}>총 근로시간</th>
+                <td style={tdS}>{pay.totalH}시간</td>
+              </tr>
+              <tr>
+                <th style={thS}>소정근로</th>
+                <td style={tdS}>{pay.sojeongTotal}h</td>
+                <th style={thS}>연장근로</th>
+                <td style={tdS}>{pay.overtimeTotal}h</td>
+              </tr>
+            </tbody>
+          </table>
+
+          {/* 안내 */}
+          <div style={{ fontSize: 9, color: C.t3, lineHeight: 1.6, marginTop: 14,
+                        padding: 10, background: '#f9fafb', borderRadius: 6 }}>
+            ※ 본 명세서는 근로기준법 제48조 제2항 및 동법 시행령 제27조의2에 따라 교부됩니다.<br/>
+            ※ 공제 요율은 2026년 기준 추정치이며, 실제 부과액은 보험료 산정기준에 따라 달라질 수 있습니다.<br/>
+            ※ 명세서 미교부 시 500만원 이하 과태료 (근기법 §116).
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const thS = {
+  border: '1px solid #d4c890',
+  padding: '6px 8px',
+  background: '#fdf6e3',
+  fontWeight: 700,
+  fontSize: 10,
+  textAlign: 'left',
+  color: '#5a4a20',
+};
+const tdS = {
+  border: '1px solid #e0d8b8',
+  padding: '6px 8px',
+  fontSize: 11,
+  color: '#2a3142',
+};
+
+function DeductRow({ label, rate, value }) {
+  return (
+    <tr>
+      <td style={tdS}>{label}</td>
+      <td style={{...tdS, fontSize: 10, color: '#666'}}>{rate}</td>
+      <td style={{...tdS, textAlign: 'right'}}>{value.toLocaleString()}</td>
+    </tr>
   );
 }
 

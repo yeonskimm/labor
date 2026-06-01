@@ -248,19 +248,35 @@ function BottomNav({ tab, setTab }) {
 function HomeTab({ data, setTab, setData }) {
   const pendingCount = data.attendance.filter(a => a.status === 'pending').length;
   const activeWorkers = data.workers.length;
+  const thisMonth = new Date().toISOString().slice(0, 7);
 
-  // 이번 달 예상 급여 (간단 추정)
+  // 이번 달 예상 급여
   const monthlyEstimate = data.workers.reduce((sum, w) => {
     if (w.type === '일용') return sum + w.hourly * 20;
-    const dailyPay = w.hourly * w.sojeongH;
-    return sum + dailyPay * 22; // 월 22일 가정
+    return sum + w.hourly * w.sojeongH * 22;
   }, 0);
+
+  // 이번 달 처리된 출퇴근 건수
+  const thisMonthApproved = data.attendance.filter(
+    a => a.date.startsWith(thisMonth) && a.status === 'approved'
+  ).length;
+
+  // 절약 시간 계산 (건당 처리 기준)
+  // 출퇴근 처리: 건당 5분 절약 / 급여계산: 근로자당 40분 절약 / 명세서: 근로자당 15분
+  const savedAttendMin = thisMonthApproved * 5;
+  const savedPayrollMin = activeWorkers * 40;
+  const savedSlipMin = activeWorkers * 15;
+  const totalSavedMin = savedAttendMin + savedPayrollMin + savedSlipMin;
+  const totalSavedH = (totalSavedMin / 60).toFixed(1);
+  // 최저임금 기준 환산
+  const savedMoney = Math.round((totalSavedMin / 60) * 10320);
 
   return (
     <div>
       <Header title="노무길잡이 원스탑" subtitle="근로계약 → 출퇴근 → 급여 통합관리" />
       <div style={{ padding: 16 }}>
-        {/* 사업장 정보 */}
+
+        {/* 사업장 카드 */}
         <Card style={{ marginBottom: 14, background: goldGrad, color: '#fff', border: 'none' }}>
           <div style={{ fontSize: 11, opacity: 0.85, fontWeight: 600 }}>사업장</div>
           <div style={{ fontSize: 20, fontWeight: 900, marginTop: 2 }}>{data.bizName}</div>
@@ -269,7 +285,7 @@ function HomeTab({ data, setTab, setData }) {
           </div>
         </Card>
 
-        {/* 요약 통계 */}
+        {/* 요약 통계 2x2 */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
           <Card style={{ padding: 12 }}>
             <div style={{ fontSize: 10, color: C.t3, fontWeight: 600 }}>재직 근로자</div>
@@ -279,7 +295,8 @@ function HomeTab({ data, setTab, setData }) {
           </Card>
           <Card style={{ padding: 12, borderColor: pendingCount > 0 ? '#fed7d7' : C.border }}>
             <div style={{ fontSize: 10, color: C.t3, fontWeight: 600 }}>미확인 출퇴근</div>
-            <div style={{ fontSize: 22, fontWeight: 900, color: pendingCount > 0 ? C.red : C.t1, marginTop: 4 }}>
+            <div style={{ fontSize: 22, fontWeight: 900,
+                          color: pendingCount > 0 ? C.red : C.t1, marginTop: 4 }}>
               {pendingCount}<span style={{ fontSize: 12, color: C.t3, marginLeft: 2 }}>건</span>
             </div>
           </Card>
@@ -292,12 +309,53 @@ function HomeTab({ data, setTab, setData }) {
           </div>
         </Card>
 
+        {/* ★ 효율성 카드 ★ */}
+        <Card style={{
+          marginBottom: 14,
+          background: 'linear-gradient(135deg,#f0fdf4,#dcfce7)',
+          borderColor: '#bbf7d0'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+            <span style={{ fontSize: 16 }}>⏱️</span>
+            <div style={{ fontWeight: 800, fontSize: 13, color: C.green }}>
+              이달 절약한 시간
+            </div>
+            <div style={{ marginLeft: 'auto', fontSize: 11, color: C.green, fontWeight: 700 }}>
+              {totalSavedH}시간
+            </div>
+          </div>
+
+          <EfficRow icon="✅" label="출퇴근 처리" detail={`${thisMonthApproved}건 × 5분`}
+                    min={savedAttendMin} />
+          <EfficRow icon="💰" label="급여 계산" detail={`근로자 ${activeWorkers}명 × 40분`}
+                    min={savedPayrollMin} />
+          <EfficRow icon="📄" label="명세서 발급" detail={`근로자 ${activeWorkers}명 × 15분`}
+                    min={savedSlipMin} />
+
+          <div style={{
+            marginTop: 10, paddingTop: 10,
+            borderTop: '1px solid rgba(45,138,90,0.15)',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+          }}>
+            <div style={{ fontSize: 11, color: C.green }}>
+              최저시급 기준 환산
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 900, color: C.green }}>
+              {savedMoney.toLocaleString()}원 상당
+            </div>
+          </div>
+
+          <div style={{ fontSize: 10, color: '#2d8a5a', opacity: 0.7, marginTop: 6, lineHeight: 1.6 }}>
+            * 수동 처리 대비 절약 추정치 (출퇴근 건당 5분, 급여계산 인당 40분, 명세서 인당 15분 기준)
+          </div>
+        </Card>
+
         {/* 빠른 실행 */}
         <div style={{ fontSize: 12, fontWeight: 800, color: C.t2, marginBottom: 8, padding: '0 2px' }}>
           ⚡ 빠른 실행
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-          <Btn variant="secondary" size="lg" onClick={() => setTab('workers')} style={{ justifyContent: 'flex-start' }}>
+          <Btn variant="secondary" size="lg" onClick={() => setTab('workers')}>
             👤 근로자 추가
           </Btn>
           <Btn variant="secondary" size="lg" onClick={() => setTab('attendance')}>
@@ -311,9 +369,9 @@ function HomeTab({ data, setTab, setData }) {
           </Btn>
         </div>
 
-        {/* 알림 */}
+        {/* 미확인 알림 */}
         {pendingCount > 0 && (
-          <Card style={{ background: '#fff5f5', borderColor: '#fed7d7' }}>
+          <Card style={{ background: '#fff5f5', borderColor: '#fed7d7', marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 18 }}>🔔</span>
               <div style={{ flex: 1 }}>
@@ -330,25 +388,42 @@ function HomeTab({ data, setTab, setData }) {
         )}
 
         {/* 데모 안내 */}
-        <Card style={{ marginTop: 14, background: '#eff6ff', borderColor: '#bfdbfe' }}>
+        <Card style={{ background: '#eff6ff', borderColor: '#bfdbfe' }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: C.blue, marginBottom: 4 }}>
-            ℹ️ 데모 버전 안내
+            ℹ️ 데모 버전
           </div>
           <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6 }}>
-            이 데모는 GitHub Pages용 단일 HTML로 제작되었습니다.<br/>
-            데이터는 기기 내(localStorage)에만 저장됩니다.<br/>
-            샘플 근로자 3명과 오늘 출퇴근 기록이 미리 들어있습니다.
+            샘플 근로자 3명이 등록되어 있습니다. 데이터는 이 기기에만 저장됩니다.
           </div>
           <Btn variant="ghost" size="sm" style={{ width: '100%', marginTop: 10 }}
                onClick={() => {
-                 if (confirm('모드 선택 화면으로 돌아갈까요? (데이터는 유지됩니다)')) {
+                 if (confirm('모드 선택으로 돌아갈까요? (데이터는 유지됩니다)')) {
                    setData({ ...data, mode: null });
                  }
                }}>
-            🔄 모드 변경 (근로자 모드 체험)
+            🔄 근로자 모드 체험하기
           </Btn>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function EfficRow({ icon, label, detail, min }) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  const display = h > 0 ? `${h}시간 ${m > 0 ? m + '분' : ''}` : `${m}분`;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '5px 0', borderBottom: '1px solid rgba(45,138,90,0.1)'
+    }}>
+      <span style={{ fontSize: 13 }}>{icon}</span>
+      <div style={{ flex: 1 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{label}</span>
+        <span style={{ fontSize: 10, color: C.t3, marginLeft: 6 }}>{detail}</span>
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.green }}>{display} 절약</div>
     </div>
   );
 }
@@ -1246,17 +1321,17 @@ function PersonalApp({ data, setData }) {
   const [tab, setTab] = useState('home');
   const p = data.personal;
 
-  // 초기 정보 미입력 시 설정 화면
   if (!p.name || !p.workplace) {
     return <PersonalSetup data={data} setData={setData} />;
   }
 
   return (
     <div>
-      {tab === 'home' && <PersonalHome data={data} setData={setData} setTab={setTab} />}
-      {tab === 'record' && <PersonalRecord data={data} setData={setData} />}
-      {tab === 'pay' && <PersonalPayCheck data={data} setData={setData} />}
-      {tab === 'help' && <PersonalHelp data={data} setData={setData} />}
+      {tab === 'home'     && <PersonalHome data={data} setData={setData} setTab={setTab} />}
+      {tab === 'record'   && <PersonalRecord data={data} setData={setData} />}
+      {tab === 'pay'      && <PersonalPayCheck data={data} setData={setData} />}
+      {tab === 'check'    && <PersonalSelfCheck data={data} setData={setData} />}
+      {tab === 'help'     && <PersonalHelp data={data} setData={setData} />}
       <PersonalNav tab={tab} setTab={setTab} />
     </div>
   );
@@ -1264,10 +1339,11 @@ function PersonalApp({ data, setData }) {
 
 function PersonalNav({ tab, setTab }) {
   const tabs = [
-    { k: 'home', icon: '🏠', label: '홈' },
+    { k: 'home',   icon: '🏠', label: '홈' },
     { k: 'record', icon: '🕐', label: '출퇴근' },
-    { k: 'pay', icon: '💰', label: '내 임금' },
-    { k: 'help', icon: '❓', label: '도움말' },
+    { k: 'pay',    icon: '💰', label: '내 임금' },
+    { k: 'check',  icon: '🔍', label: '자가진단' },
+    { k: 'help',   icon: '❓', label: '도움말' },
   ];
   return (
     <div style={{
@@ -1282,10 +1358,10 @@ function PersonalNav({ tab, setTab }) {
         <button key={t.k} onClick={() => setTab(t.k)} style={{
           background: 'transparent', border: 'none',
           display: 'flex', flexDirection: 'column', alignItems: 'center',
-          gap: 3, cursor: 'pointer', padding: '4px 12px',
+          gap: 3, cursor: 'pointer', padding: '4px 8px',
           color: tab === t.k ? C.blue : C.t3, fontFamily: 'inherit'
         }}>
-          <span style={{ fontSize: 20 }}>{t.icon}</span>
+          <span style={{ fontSize: 18 }}>{t.icon}</span>
           <span style={{ fontSize: 10, fontWeight: tab === t.k ? 800 : 600 }}>{t.label}</span>
         </button>
       ))}
@@ -1355,15 +1431,65 @@ function PersonalHome({ data, setData, setTab }) {
   const p = data.personal;
   const thisMonth = new Date().toISOString().slice(0, 7);
   const thisMonthRecs = p.records.filter(r => r.date.startsWith(thisMonth) && r.outT);
-
-  // 이번 달 받아야 할 임금
+  const allRecs = p.records.filter(r => r.outT);
   const calc = calcPersonalPay(thisMonthRecs, p);
+
+  // 누적 통계 (전체 기간)
+  const totalDays = allRecs.length;
+  const totalH = allRecs.reduce((s, r) => s + calcDayHours(r), 0);
+  const totalShouldGet = allRecs.reduce((s, r) => {
+    const h = calcDayHours(r);
+    const sj = Math.min(h, p.sojeongH);
+    const ot = Math.max(0, h - p.sojeongH);
+    return s + sj * p.hourly + ot * p.hourly * 1.5;
+  }, 0);
+
+  // 실제 받은 전체 금액
+  const totalActual = p.actualReceived.reduce((s, a) => s + a.amount, 0);
+  const totalDiff = totalActual - totalShouldGet;
+
+  // GPS 기록 비율
+  const gpsCount = allRecs.filter(r => r.inGPS).length;
+  const gpsRatio = totalDays > 0 ? Math.round(gpsCount / totalDays * 100) : 0;
+
+  const exportEvidence = () => {
+    const lines = [
+      '=== 노무길잡이 근무 증거 기록 ===',
+      `이름: ${p.name}`,
+      `사업장: ${p.workplace}`,
+      `시급: ${p.hourly.toLocaleString()}원`,
+      `출력일시: ${new Date().toLocaleString('ko-KR')}`,
+      '',
+      '=== 출퇴근 기록 ===',
+      ...allRecs.map(r =>
+        `${r.date}  출근 ${r.inT}${r.inGPS ? ` [GPS: ${r.inGPS.lat},${r.inGPS.lng} ±${r.inGPS.acc}m]` : ''} / 퇴근 ${r.outT}${r.outGPS ? ` [GPS: ${r.outGPS.lat},${r.outGPS.lng} ±${r.outGPS.acc}m]` : ''}  근무 ${calcDayHours(r).toFixed(1)}h`
+      ),
+      '',
+      '=== 임금 요약 ===',
+      `총 근무일: ${totalDays}일`,
+      `총 근무시간: ${totalH.toFixed(1)}h`,
+      `받아야 할 금액(추정): ${Math.round(totalShouldGet).toLocaleString()}원`,
+      totalActual > 0 ? `실제 받은 금액: ${totalActual.toLocaleString()}원` : '',
+      totalActual > 0 ? `차이: ${totalDiff >= 0 ? '+' : ''}${totalDiff.toLocaleString()}원` : '',
+      '',
+      '※ 본 기록은 노무길잡이 앱에서 자동 생성된 증거 자료입니다.',
+      '※ 노동청 진정 시 첨부 가능합니다. (고용노동부 1350)',
+    ].filter(Boolean).join('\n');
+
+    const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `근무증거기록_${p.name}_${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div>
       <div style={{
         background: 'linear-gradient(180deg,#ffffff 0%,#f4f8fd 100%)',
-        borderBottom: '1px solid rgba(184,146,42,0.12)',
+        borderBottom: '1px solid rgba(59,110,196,0.12)',
         padding: '14px 16px', position: 'sticky', top: 0, zIndex: 10,
         boxShadow: '0 2px 12px rgba(30,50,90,0.06)',
         display: 'flex', alignItems: 'center', gap: 10
@@ -1376,7 +1502,7 @@ function PersonalHome({ data, setData, setTab }) {
           <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>{p.workplace}</div>
         </div>
         <button onClick={() => {
-          if (confirm('모드 선택 화면으로 돌아갈까요? (기록은 그대로 유지됩니다)')) {
+          if (confirm('모드 선택으로 돌아갈까요? (기록은 유지됩니다)')) {
             setData({ ...data, mode: null });
           }
         }} style={{
@@ -1387,52 +1513,102 @@ function PersonalHome({ data, setData, setTab }) {
       </div>
 
       <div style={{ padding: 16 }}>
-        {/* 이번 달 카드 */}
+
+        {/* 이번 달 임금 카드 */}
         <Card style={{
           background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
-          color: '#fff', border: 'none', marginBottom: 14
+          color: '#fff', border: 'none', marginBottom: 10
         }}>
           <div style={{ fontSize: 11, opacity: 0.85 }}>이번 달 받아야 할 임금</div>
           <div style={{ fontSize: 26, fontWeight: 900, marginTop: 4 }}>
             {calc.total.toLocaleString()}<span style={{ fontSize: 12 }}>원</span>
           </div>
           <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
-            근무 {calc.days}일 · 총 {calc.totalH}시간 · 주휴 포함
+            근무 {calc.days}일 · {calc.totalH}시간 · 주휴 포함
           </div>
         </Card>
 
-        {/* 최저임금 체크 */}
-        {(() => {
-          if (calc.totalH === 0) return null;
-          const effHourly = calc.total / parseFloat(calc.totalH);
-          const minOK = effHourly >= 10320 || p.hourly >= 10320;
-          if (!minOK) {
-            return (
-              <Card style={{ background: '#fff5f5', borderColor: '#fed7d7', marginBottom: 14 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: C.red, marginBottom: 4 }}>
-                  ⚠️ 최저임금 미달
-                </div>
-                <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6 }}>
-                  시급 {p.hourly.toLocaleString()}원 / 2026년 최저시급 10,320원<br/>
-                  최저임금법 위반 가능성이 있어요.
-                </div>
-              </Card>
-            );
-          }
-          return null;
-        })()}
+        {/* 최저임금 경고 */}
+        {p.hourly < 10320 && (
+          <Card style={{ background: '#fff5f5', borderColor: '#fed7d7', marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: C.red }}>
+              ⚠️ 시급 {p.hourly.toLocaleString()}원 → 최저임금(10,320원) 미달
+            </div>
+            <div style={{ fontSize: 10, color: C.t2, marginTop: 4 }}>
+              자가진단 탭에서 자세한 안내를 확인하세요
+            </div>
+          </Card>
+        )}
+
+        {/* ★ 누적 통계 대시보드 ★ */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.t2,
+                      marginBottom: 8, padding: '0 2px' }}>
+          📊 누적 현황 (전체 기간)
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+          <StatBox label="총 근무일" value={totalDays} unit="일" color={C.blue} />
+          <StatBox label="총 근무시간" value={totalH.toFixed(1)} unit="h" color={C.blue} />
+          <StatBox label="GPS 기록 비율" value={gpsRatio} unit="%" color={gpsRatio >= 70 ? C.green : C.goldD}
+                   sub={gpsRatio >= 70 ? '증거력 높음' : '증거력 보통'} />
+          <StatBox label="받아야 할 금액"
+                   value={Math.round(totalShouldGet / 10000).toLocaleString()}
+                   unit="만원" color={C.blue} />
+        </div>
+
+        {/* 미지급 누적 비교 */}
+        {totalActual > 0 && (
+          <Card style={{
+            marginBottom: 10,
+            background: totalDiff < -10000 ? '#fff5f5' : '#f0fdf4',
+            borderColor: totalDiff < -10000 ? '#fed7d7' : '#bbf7d0'
+          }}>
+            <div style={{ fontWeight: 800, fontSize: 12,
+                          color: totalDiff < -10000 ? C.red : C.green, marginBottom: 6 }}>
+              {totalDiff < -10000 ? '⚠️ 누적 미지급 의심' : '✓ 누적 지급 정상'}
+            </div>
+            <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.8 }}>
+              받아야 할 금액: {Math.round(totalShouldGet).toLocaleString()}원<br/>
+              실제 받은 금액: {totalActual.toLocaleString()}원<br/>
+              <strong style={{ color: totalDiff < 0 ? C.red : C.green }}>
+                차이: {totalDiff >= 0 ? '+' : ''}{totalDiff.toLocaleString()}원
+              </strong>
+            </div>
+          </Card>
+        )}
+
+        {/* ★ 증거 내보내기 ★ */}
+        <Card style={{ marginBottom: 10, background: '#fffbeb', borderColor: '#fde68a' }}>
+          <div style={{ fontWeight: 800, fontSize: 12, color: C.goldD, marginBottom: 6 }}>
+            📁 증거 파일 내보내기
+          </div>
+          <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6, marginBottom: 10 }}>
+            출퇴근 기록 + GPS 좌표 + 임금 계산 결과를 하나의 텍스트 파일로 저장합니다.
+            노동청 진정 시 <strong>바로 첨부</strong>할 수 있는 형태입니다.
+          </div>
+          <Btn onClick={exportEvidence} style={{
+            width: '100%',
+            background: 'linear-gradient(135deg,#d4a83c,#b8922a)'
+          }} size="md" disabled={allRecs.length === 0}>
+            📥 증거 기록 내보내기 ({allRecs.length}건)
+          </Btn>
+          {allRecs.length === 0 && (
+            <div style={{ fontSize: 10, color: C.t3, marginTop: 6, textAlign: 'center' }}>
+              출퇴근 기록이 있어야 내보낼 수 있습니다
+            </div>
+          )}
+        </Card>
 
         {/* 빠른 실행 */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
           <Btn variant="secondary" size="lg" onClick={() => setTab('record')}>
             🕐 오늘 출퇴근
           </Btn>
-          <Btn variant="secondary" size="lg" onClick={() => setTab('pay')}>
-            💰 임금 비교
+          <Btn variant="secondary" size="lg" onClick={() => setTab('check')}>
+            🔍 내 권리 진단
           </Btn>
         </div>
 
-        {/* 최근 근무 기록 */}
+        {/* 최근 기록 */}
         <div style={{ fontSize: 12, fontWeight: 800, color: C.t2,
                       marginBottom: 8, padding: '0 2px' }}>
           📅 최근 근무
@@ -1449,13 +1625,16 @@ function PersonalHome({ data, setData, setTab }) {
               <div style={{ display: 'flex', justifyContent: 'space-between',
                             alignItems: 'center' }}>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{r.date}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{r.date}</span>
+                    {r.inGPS ? <Badge color="blue">📍GPS</Badge> : <Badge color="gray">시각만</Badge>}
+                  </div>
                   <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                     {r.inT} ~ {r.outT || '진행중'}
                   </div>
                 </div>
                 {r.outT && (
-                  <div style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>
+                  <div style={{ fontSize: 12, color: C.blue, fontWeight: 700 }}>
                     {calcDayHours(r).toFixed(1)}h
                   </div>
                 )}
@@ -1464,15 +1643,26 @@ function PersonalHome({ data, setData, setTab }) {
           ))
         )}
 
-        {/* 안내 */}
-        <Card style={{ marginTop: 14, background: '#fffbeb', borderColor: '#fde68a' }}>
+        <Card style={{ marginTop: 6, background: '#fffbeb', borderColor: '#fde68a' }}>
           <div style={{ fontSize: 11, color: C.goldD, lineHeight: 1.6 }}>
-            💡 <strong>이 기록은 분쟁 시 증거가 됩니다.</strong><br/>
-            매일 잊지 말고 기록하세요. 사장님이 동의하지 않아도 본인이 한 일은 본인이 기록할 권리가 있습니다.
+            💡 <strong>GPS 포함 기록이 증거력이 높습니다.</strong> 매일 출근 버튼을 눌러
+            GPS가 자동으로 찍히게 하세요. 사장님이 나중에 부인해도 위치로 입증됩니다.
           </div>
         </Card>
       </div>
     </div>
+  );
+}
+
+function StatBox({ label, value, unit, color, sub }) {
+  return (
+    <Card style={{ padding: 10, textAlign: 'center' }}>
+      <div style={{ fontSize: 10, color: C.t3, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 900, color }}>
+        {value}<span style={{ fontSize: 11, marginLeft: 2 }}>{unit}</span>
+      </div>
+      {sub && <div style={{ fontSize: 9, color, marginTop: 2, fontWeight: 700 }}>{sub}</div>}
+    </Card>
   );
 }
 
@@ -1970,6 +2160,191 @@ function PersonalPayCheck({ data, setData }) {
           ※ 받아야 할 임금은 세전 금액 기준입니다. 실수령액과 비교 시 4대보험·세금 공제(약 9~10%)를 감안하세요.<br/>
           ※ 본 계산은 추정치이며, 실제 사업장 사정에 따라 다를 수 있습니다.
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 내 권리 자가진단 ---- */
+function PersonalSelfCheck({ data }) {
+  const p = data.personal;
+  const allRecs = p.records.filter(r => r.outT);
+  const totalH = allRecs.reduce((s, r) => s + calcDayHours(r), 0);
+
+  // 최근 4주 데이터
+  const now = new Date();
+  const weeks = [0,1,2,3].map(w => {
+    const start = new Date(now);
+    start.setDate(start.getDate() - (w+1)*7);
+    const end = new Date(now);
+    end.setDate(end.getDate() - w*7);
+    const recs = allRecs.filter(r => {
+      const d = new Date(r.date);
+      return d >= start && d < end;
+    });
+    const wH = recs.reduce((s, r) => s + calcDayHours(r), 0);
+    return { week: w+1, days: recs.length, hours: wH };
+  });
+
+  const items = [
+    {
+      icon: '💵',
+      title: '최저임금',
+      law: '최저임금법 §6',
+      ok: p.hourly >= 10320,
+      okMsg: `시급 ${p.hourly.toLocaleString()}원 ✓ 최저임금(10,320원) 이상`,
+      failMsg: `시급 ${p.hourly.toLocaleString()}원 — 최저임금(10,320원) 미달`,
+      failAction: '사업주에게 시급 조정 요청 or 노동청 1350 상담',
+      severity: 'high',
+    },
+    {
+      icon: '🗓️',
+      title: '주휴수당',
+      law: '근기법 §55',
+      ok: weeks.some(w => w.hours >= 15 && w.days >= 5),
+      okMsg: '주 15시간 이상 개근 주가 있어 주휴수당 발생 가능',
+      failMsg: '최근 4주 중 주 15시간 이상 + 개근 주가 없음',
+      failAction: '주휴수당은 주 15시간 이상 + 개근 시 발생. 현재 기록으로는 발생 조건 미확인',
+      severity: 'medium',
+    },
+    {
+      icon: '📄',
+      title: '근로계약서',
+      law: '근기법 §17',
+      ok: null, // 자가 확인 필요
+      okMsg: null,
+      failMsg: '계약서 교부 여부를 확인해주세요',
+      selfCheck: true,
+      failAction: '계약서 미교부는 사업주 500만원 이하 벌금. 요청할 권리가 있습니다.',
+      severity: 'high',
+    },
+    {
+      icon: '⏰',
+      title: '연장근로수당',
+      law: '근기법 §56',
+      ok: allRecs.some(r => calcDayHours(r) > p.sojeongH),
+      okMsg: '소정시간 초과 근무 기록 있음 → 연장수당(1.5배) 발생 대상',
+      failMsg: '소정시간 초과 근무 기록 없음 (5인 미만 사업장 미적용)',
+      failAction: '5인 이상 사업장에서 소정시간 초과 시 1.5배 가산. 명세서에서 확인하세요.',
+      severity: 'medium',
+    },
+    {
+      icon: '📊',
+      title: '임금명세서',
+      law: '근기법 §48',
+      ok: null,
+      okMsg: null,
+      failMsg: '매월 임금 지급 시 명세서를 받아야 합니다',
+      selfCheck: true,
+      failAction: '미교부 시 사업주 500만원 이하 과태료. 요청하거나 앱 내 자동 계산 결과를 활용하세요.',
+      severity: 'medium',
+    },
+    {
+      icon: '🏥',
+      title: '4대보험',
+      law: '각 사회보험법',
+      ok: null,
+      okMsg: null,
+      failMsg: '주 15시간 이상 또는 월 60시간 이상 근무 시 4대보험 가입 의무',
+      selfCheck: true,
+      failAction: '건강보험공단(1577-1000), 국민연금(1355) 가입 여부 확인 가능',
+      severity: 'medium',
+    },
+  ];
+
+  const [selfChecks, setSelfChecks] = useState({});
+
+  return (
+    <div>
+      <Header title="내 권리 자가진단" subtitle="현재 기록 기준 자동 판정" />
+      <div style={{ padding: 16 }}>
+
+        <Card style={{ background: '#eff6ff', borderColor: '#bfdbfe', marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: C.blue, lineHeight: 1.6 }}>
+            💡 출퇴근 기록과 시급 설정을 바탕으로 자동 판정합니다.<br/>
+            📌 표시 항목은 직접 확인이 필요합니다.
+          </div>
+        </Card>
+
+        {items.map((item, i) => {
+          const checked = selfChecks[i];
+          const isOk = item.selfCheck
+            ? checked === true
+            : item.ok === true;
+          const isFail = item.selfCheck
+            ? checked === false
+            : item.ok === false;
+
+          return (
+            <Card key={i} style={{
+              marginBottom: 10,
+              borderColor: isOk ? '#bbf7d0'
+                         : isFail ? (item.severity === 'high' ? '#fed7d7' : '#fde68a')
+                         : C.border,
+              background: isOk ? '#f0fdf4'
+                        : isFail ? (item.severity === 'high' ? '#fff5f5' : '#fffbeb')
+                        : '#fff'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <span style={{ fontSize: 20, flexShrink: 0 }}>{item.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <span style={{ fontWeight: 800, fontSize: 13, color: C.t1 }}>{item.title}</span>
+                    <span style={{ fontSize: 10, color: C.t3 }}>{item.law}</span>
+                    {item.severity === 'high' && <Badge color="red">중요</Badge>}
+                  </div>
+
+                  {item.selfCheck ? (
+                    <div>
+                      <div style={{ fontSize: 11, color: C.t2, marginBottom: 8, lineHeight: 1.5 }}>
+                        📌 직접 확인 필요 — {item.failMsg}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <Btn size="sm" variant={checked === true ? 'primary' : 'secondary'}
+                             onClick={() => setSelfChecks({ ...selfChecks, [i]: true })}>
+                          ✓ 받고 있어요
+                        </Btn>
+                        <Btn size="sm" variant={checked === false ? 'danger' : 'secondary'}
+                             onClick={() => setSelfChecks({ ...selfChecks, [i]: false })}>
+                          ✗ 못 받고 있어요
+                        </Btn>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, lineHeight: 1.5,
+                                  color: isOk ? C.green : isFail ? C.red : C.t2 }}>
+                      {isOk ? `✓ ${item.okMsg}` : `✗ ${item.failMsg}`}
+                    </div>
+                  )}
+
+                  {isFail && (
+                    <div style={{
+                      marginTop: 8, padding: 8,
+                      background: 'rgba(0,0,0,0.04)', borderRadius: 6,
+                      fontSize: 10, color: C.t2, lineHeight: 1.6
+                    }}>
+                      💬 {item.failAction}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+          );
+        })}
+
+        {/* 신고 안내 */}
+        <Card style={{ background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+                       color: '#fff', border: 'none', marginTop: 6 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+            위반이 의심된다면?
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.9, lineHeight: 1.7 }}>
+            <a href="tel:1350" style={{ color: '#fff', fontWeight: 900, fontSize: 14 }}>
+              ☎ 1350
+            </a> 고용노동부 무료 상담<br/>
+            홈 탭에서 증거 파일을 먼저 내보내세요
+          </div>
+        </Card>
       </div>
     </div>
   );

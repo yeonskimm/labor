@@ -1477,35 +1477,99 @@ function PersonalHome({ data, setData, setTab }) {
 }
 
 /* ---- 개인 모드: 출퇴근 기록 ---- */
+/* GPS 좌표 취득 헬퍼 */
+function getGPS() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({
+        lat: p.coords.latitude.toFixed(6),
+        lng: p.coords.longitude.toFixed(6),
+        acc: Math.round(p.coords.accuracy),
+      }),
+      () => resolve(null),
+      { timeout: 8000, enableHighAccuracy: true }
+    );
+  });
+}
+
+/* 현재 시각 문자열 */
+function nowTime() {
+  const n = new Date();
+  return String(n.getHours()).padStart(2,'0') + ':' + String(n.getMinutes()).padStart(2,'0');
+}
+
+/* 카카오/구글맵 링크 */
+function mapLink(lat, lng) {
+  return `https://www.google.com/maps?q=${lat},${lng}`;
+}
+
 function PersonalRecord({ data, setData }) {
   const p = data.personal;
-  const [date, setDate] = useState(todayStr());
-  const [inT, setInT] = useState('09:00');
-  const [outT, setOutT] = useState('18:00');
 
-  // 이 날짜에 이미 기록이 있는지
-  const existing = p.records.find(r => r.date === date);
+  // 오늘 기록 (진행 중인 것)
+  const today = todayStr();
+  const todayRec = p.records.find(r => r.date === today);
+  const clockedIn  = !!(todayRec?.inT);
+  const clockedOut = !!(todayRec?.outT);
 
-  const save = () => {
-    const newRec = { id: 'pr' + Date.now(), date, inT, outT };
-    let records = p.records;
-    if (existing) {
-      if (!confirm('이미 이 날짜 기록이 있어요. 덮어쓸까요?')) return;
-      records = records.filter(r => r.id !== existing.id);
-    }
-    records = [...records, newRec].sort((a, b) => a.date.localeCompare(b.date));
-    setData({ ...data, personal: { ...p, records } });
-    alert('기록되었습니다!');
+  // GPS 포함 여부 토글
+  const [useGPS, setUseGPS] = useState(true);
+  const [gpsLoading, setGpsLoading] = useState(false);
+
+  // 소급 입력 패널
+  const [showManual, setShowManual] = useState(false);
+  const [manDate, setManDate] = useState(today);
+  const [manIn, setManIn]   = useState('09:00');
+  const [manOut, setManOut] = useState('18:00');
+
+  /* ---- 원터치 출근 ---- */
+  const handleClockIn = async () => {
+    if (clockedIn && !confirm('오늘 출근 기록을 다시 찍을까요?')) return;
+    setGpsLoading(true);
+    const gps = useGPS ? await getGPS() : null;
+    setGpsLoading(false);
+    const t = nowTime();
+    const newRec = {
+      id: todayRec?.id || ('pr' + Date.now()),
+      date: today,
+      inT: t,
+      inGPS: gps,
+      outT: todayRec?.outT || '',
+      outGPS: todayRec?.outGPS || null,
+    };
+    upsertRecord(newRec);
   };
 
-  const clockNow = (which) => {
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const t = `${hh}:${mm}`;
-    if (which === 'in') setInT(t);
-    else setOutT(t);
+  /* ---- 원터치 퇴근 ---- */
+  const handleClockOut = async () => {
+    if (!clockedIn) { alert('출근 기록을 먼저 해주세요'); return; }
+    if (clockedOut && !confirm('오늘 퇴근 기록을 다시 찍을까요?')) return;
+    setGpsLoading(true);
+    const gps = useGPS ? await getGPS() : null;
+    setGpsLoading(false);
+    const t = nowTime();
+    const newRec = { ...todayRec, outT: t, outGPS: gps };
+    upsertRecord(newRec);
   };
+
+  /* ---- 소급 저장 ---- */
+  const handleManualSave = () => {
+    const existing = p.records.find(r => r.date === manDate);
+    if (existing && !confirm('이 날짜 기록이 있어요. 덮어쓸까요?')) return;
+    upsertRecord({
+      id: existing?.id || ('pr' + Date.now()),
+      date: manDate, inT: manIn, outT: manOut,
+      inGPS: null, outGPS: null,
+    });
+    setShowManual(false);
+  };
+
+  function upsertRecord(rec) {
+    const others = p.records.filter(r => r.id !== rec.id && r.date !== rec.date);
+    const sorted = [...others, rec].sort((a,b) => a.date.localeCompare(b.date));
+    setData({ ...data, personal: { ...p, records: sorted } });
+  }
 
   const del = (id) => {
     if (!confirm('이 기록을 삭제할까요?')) return;
@@ -1514,45 +1578,183 @@ function PersonalRecord({ data, setData }) {
 
   return (
     <div>
-      <Header title="출퇴근 기록" subtitle={`${p.name}님 본인 기록`} />
+      <Header title="출퇴근 기록" subtitle={`${p.name}님 · ${today}`} />
       <div style={{ padding: 16 }}>
-        <Card style={{ marginBottom: 14 }}>
-          <div style={{ fontWeight: 800, fontSize: 13, color: C.t1, marginBottom: 10 }}>
-            📝 오늘 또는 과거 기록
-          </div>
-          <Field label="날짜" type="date" value={date} onChange={setDate} />
 
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>출근 시각</div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input type="time" value={inT} onChange={e => setInT(e.target.value)} style={{
-                flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
-                border: `1.5px solid ${C.border}`, borderRadius: 8,
-                background: '#fff', fontFamily: 'inherit', outline: 'none'
-              }} />
-              <Btn variant="secondary" size="sm" onClick={() => clockNow('in')}>지금</Btn>
+        {/* GPS 토글 */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          background: useGPS ? '#eff6ff' : '#f9fafb',
+          border: `1px solid ${useGPS ? '#bfdbfe' : C.border}`,
+          borderRadius: 10, padding: '10px 14px', marginBottom: 14,
+          cursor: 'pointer'
+        }} onClick={() => setUseGPS(!useGPS)}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 800,
+                          color: useGPS ? C.blue : C.t3 }}>
+              📍 위치 포함 {useGPS ? 'ON' : 'OFF'}
+            </div>
+            <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+              {useGPS ? '출퇴근 시 GPS 좌표를 함께 기록합니다 (증거력 ↑)' : '시각만 기록합니다'}
             </div>
           </div>
-
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>퇴근 시각</div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input type="time" value={outT} onChange={e => setOutT(e.target.value)} style={{
-                flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
-                border: `1.5px solid ${C.border}`, borderRadius: 8,
-                background: '#fff', fontFamily: 'inherit', outline: 'none'
-              }} />
-              <Btn variant="secondary" size="sm" onClick={() => clockNow('out')}>지금</Btn>
-            </div>
+          {/* 토글 스위치 */}
+          <div style={{
+            width: 40, height: 22, borderRadius: 11,
+            background: useGPS ? C.blue : '#ccc',
+            position: 'relative', transition: 'background 0.2s',
+            flexShrink: 0
+          }}>
+            <div style={{
+              position: 'absolute', top: 3,
+              left: useGPS ? 21 : 3,
+              width: 16, height: 16, borderRadius: 8,
+              background: '#fff', transition: 'left 0.2s',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.2)'
+            }} />
           </div>
+        </div>
 
-          <Btn onClick={save} style={{
-            width: '100%', marginTop: 6,
-            background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)'
-          }} size="lg">
-            {existing ? '✓ 수정 저장' : '✓ 저장하기'}
-          </Btn>
+        {/* GPS 로딩 중 */}
+        {gpsLoading && (
+          <Card style={{ textAlign: 'center', padding: 12, marginBottom: 14,
+                         background: '#eff6ff', borderColor: '#bfdbfe' }}>
+            <div style={{ fontSize: 12, color: C.blue }}>📍 위치 확인 중...</div>
+          </Card>
+        )}
+
+        {/* 오늘 상태 카드 */}
+        <Card style={{
+          marginBottom: 14,
+          background: clockedOut ? 'linear-gradient(135deg,#3b6ec4,#2d5aa8)'
+                     : clockedIn ? 'linear-gradient(135deg,#2d8a5a,#1e6b45)'
+                     : cardGrad,
+          color: (clockedIn || clockedOut) ? '#fff' : C.t1,
+          border: 'none'
+        }}>
+          <div style={{ fontSize: 11, opacity: 0.85, marginBottom: 6 }}>오늘 근무 현황</div>
+          <div style={{ display: 'flex', gap: 20, marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 10, opacity: 0.75 }}>출근</div>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>
+                {todayRec?.inT || '-'}
+              </div>
+              {todayRec?.inGPS && (
+                <a href={mapLink(todayRec.inGPS.lat, todayRec.inGPS.lng)}
+                   target="_blank" rel="noreferrer"
+                   style={{ fontSize: 9, color: '#fff', opacity: 0.9,
+                            textDecoration: 'underline' }}>
+                  📍 지도보기 (±{todayRec.inGPS.acc}m)
+                </a>
+              )}
+            </div>
+            <div>
+              <div style={{ fontSize: 10, opacity: 0.75 }}>퇴근</div>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>
+                {todayRec?.outT || '-'}
+              </div>
+              {todayRec?.outGPS && (
+                <a href={mapLink(todayRec.outGPS.lat, todayRec.outGPS.lng)}
+                   target="_blank" rel="noreferrer"
+                   style={{ fontSize: 9, color: '#fff', opacity: 0.9,
+                            textDecoration: 'underline' }}>
+                  📍 지도보기 (±{todayRec.outGPS.acc}m)
+                </a>
+              )}
+            </div>
+            {clockedIn && clockedOut && (
+              <div>
+                <div style={{ fontSize: 10, opacity: 0.75 }}>근무시간</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>
+                  {calcDayHours(todayRec).toFixed(1)}h
+                </div>
+              </div>
+            )}
+          </div>
         </Card>
+
+        {/* 원터치 버튼 */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+          {/* 출근 버튼 */}
+          <button onClick={handleClockIn} disabled={gpsLoading} style={{
+            padding: '20px 10px',
+            background: clockedIn
+              ? 'linear-gradient(135deg,#1e6b45,#2d8a5a)'
+              : 'linear-gradient(135deg,#2d8a5a,#3aab72)',
+            border: 'none', borderRadius: 14, cursor: 'pointer',
+            color: '#fff', fontFamily: 'inherit',
+            boxShadow: '0 4px 16px rgba(45,138,90,0.35)',
+            transition: 'all 0.15s',
+            opacity: gpsLoading ? 0.6 : 1
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 6 }}>🟢</div>
+            <div style={{ fontSize: 14, fontWeight: 900 }}>출근</div>
+            <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+              {clockedIn ? `✓ ${todayRec.inT} 기록됨` : '지금 눌러 기록'}
+            </div>
+          </button>
+
+          {/* 퇴근 버튼 */}
+          <button onClick={handleClockOut} disabled={gpsLoading || !clockedIn} style={{
+            padding: '20px 10px',
+            background: clockedOut
+              ? 'linear-gradient(135deg,#2d5aa8,#3b6ec4)'
+              : clockedIn
+                ? 'linear-gradient(135deg,#c53030,#e05050)'
+                : '#e5e7eb',
+            border: 'none', borderRadius: 14,
+            cursor: (!clockedIn || gpsLoading) ? 'not-allowed' : 'pointer',
+            color: clockedIn ? '#fff' : C.t3,
+            fontFamily: 'inherit',
+            boxShadow: clockedIn ? '0 4px 16px rgba(197,48,48,0.3)' : 'none',
+            transition: 'all 0.15s',
+            opacity: gpsLoading ? 0.6 : 1
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 6 }}>🔴</div>
+            <div style={{ fontSize: 14, fontWeight: 900 }}>퇴근</div>
+            <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+              {clockedOut ? `✓ ${todayRec.outT} 기록됨`
+               : clockedIn ? '지금 눌러 기록'
+               : '출근 먼저 필요'}
+            </div>
+          </button>
+        </div>
+
+        {/* GPS 안내 */}
+        <Card style={{ marginBottom: 14, padding: 10,
+                       background: '#fffbeb', borderColor: '#fde68a' }}>
+          <div style={{ fontSize: 10, color: C.goldD, lineHeight: 1.7 }}>
+            💡 <strong>위치 기록이 증거력을 높입니다.</strong><br/>
+            기록된 GPS 좌표는 구글맵 링크로 확인 가능하며,<br/>
+            노동청 진정 시 "실제로 사업장에 있었음"을 입증하는 자료가 됩니다.<br/>
+            위치 권한을 거부해도 시각 기록은 정상 저장됩니다.
+          </div>
+        </Card>
+
+        {/* 소급 입력 */}
+        <Btn variant="secondary" size="md"
+             style={{ width: '100%', marginBottom: 14 }}
+             onClick={() => setShowManual(!showManual)}>
+          {showManual ? '▲ 소급 입력 닫기' : '📝 과거 날짜 소급 입력'}
+        </Btn>
+
+        {showManual && (
+          <Card style={{ marginBottom: 14, background: '#f9fafb' }}>
+            <div style={{ fontSize: 11, color: C.t3, marginBottom: 10, lineHeight: 1.6 }}>
+              ※ 소급 입력은 GPS가 기록되지 않아 증거력이 낮습니다.<br/>
+              가능하면 매일 실시간으로 기록하세요.
+            </div>
+            <Field label="날짜" type="date" value={manDate} onChange={setManDate} />
+            <Field label="출근 시각" type="time" value={manIn} onChange={setManIn} />
+            <Field label="퇴근 시각" type="time" value={manOut} onChange={setManOut} />
+            <Btn onClick={handleManualSave}
+                 style={{ width: '100%', marginTop: 4,
+                          background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)' }}
+                 size="md">
+              저장
+            </Btn>
+          </Card>
+        )}
 
         {/* 누적 기록 목록 */}
         <div style={{ fontSize: 12, fontWeight: 800, color: C.t2,
@@ -1565,18 +1767,51 @@ function PersonalRecord({ data, setData }) {
           </Card>
         ) : (
           p.records.slice().reverse().map(r => (
-            <Card key={r.id} style={{ marginBottom: 6, padding: 10 }}>
+            <Card key={r.id} style={{ marginBottom: 6, padding: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between',
-                            alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{r.date}</div>
-                  <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
-                    {r.inT} ~ {r.outT} · {calcDayHours(r).toFixed(1)}h
+                            alignItems: 'flex-start' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: C.t1 }}>{r.date}</span>
+                    {(r.inGPS || r.outGPS)
+                      ? <Badge color="blue">📍 GPS</Badge>
+                      : <Badge color="gray">시각만</Badge>}
                   </div>
+                  <div style={{ fontSize: 11, color: C.t2 }}>
+                    출근 <strong>{r.inT || '-'}</strong>
+                    {r.inGPS && (
+                      <a href={mapLink(r.inGPS.lat, r.inGPS.lng)}
+                         target="_blank" rel="noreferrer"
+                         style={{ marginLeft: 4, fontSize: 10,
+                                  color: C.blue, textDecoration: 'none' }}>
+                        🗺️
+                      </a>
+                    )}
+                    {'  '}퇴근 <strong>{r.outT || '-'}</strong>
+                    {r.outGPS && (
+                      <a href={mapLink(r.outGPS.lat, r.outGPS.lng)}
+                         target="_blank" rel="noreferrer"
+                         style={{ marginLeft: 4, fontSize: 10,
+                                  color: C.blue, textDecoration: 'none' }}>
+                        🗺️
+                      </a>
+                    )}
+                  </div>
+                  {r.inGPS && (
+                    <div style={{ fontSize: 9, color: C.t3, marginTop: 3 }}>
+                      출근위치 {r.inGPS.lat}, {r.inGPS.lng} (±{r.inGPS.acc}m)
+                    </div>
+                  )}
+                  {r.outT && (
+                    <div style={{ fontSize: 10, color: C.t3, marginTop: 3 }}>
+                      총 {calcDayHours(r).toFixed(1)}h
+                    </div>
+                  )}
                 </div>
                 <button onClick={() => del(r.id)} style={{
                   background: 'transparent', border: 'none', color: C.red,
-                  fontSize: 11, cursor: 'pointer', fontFamily: 'inherit'
+                  fontSize: 11, cursor: 'pointer', fontFamily: 'inherit',
+                  flexShrink: 0, paddingLeft: 8
                 }}>삭제</button>
               </div>
             </Card>

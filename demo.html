@@ -635,11 +635,11 @@ function AttendanceTab({ data, setData }) {
   };
 
   // 근로자 입력 시뮬레이션
-  const simulateWorkerInput = (workerId, inT, outT) => {
+  const simulateWorkerInput = (workerId, inT, outT, breakH) => {
     const newRec = {
       id: 'a' + Date.now(),
       workerId, date: selectedDate,
-      inT, outT,
+      inT, outT, breakH: breakH ?? 0,
       status: 'pending', source: 'worker'
     };
     setData({ ...data, attendance: [...data.attendance, newRec] });
@@ -713,6 +713,17 @@ function AttendanceTab({ data, setData }) {
                 <div style={{ display: 'flex', gap: 16, fontSize: 12, color: C.t2, marginBottom: 10 }}>
                   <div>출근 <strong style={{ color: C.t1 }}>{rec.inT || '-'}</strong></div>
                   <div>퇴근 <strong style={{ color: C.t1 }}>{rec.outT || '-'}</strong></div>
+                  {rec.outT && (
+                    <div>휴게 <strong style={{ color: C.t1 }}>
+                      {rec.breakH !== undefined && rec.breakH !== null && rec.breakH !== ''
+                        ? `${rec.breakH}h`
+                        : `${legalBreakH((() => {
+                            const [ih,im] = rec.inT.split(':').map(Number);
+                            const [oh,om] = rec.outT.split(':').map(Number);
+                            return (oh+om/60)-(ih+im/60);
+                          })())}h(법정)`}
+                    </strong></div>
+                  )}
                 </div>
                 {isPending && (
                   <div style={{ display: 'flex', gap: 6 }}>
@@ -737,6 +748,18 @@ function AttendanceForm({ data, selectedDate, onSave, onCancel }) {
   const [workerId, setWorkerId] = useState(data.workers[0]?.id || '');
   const [inT, setInT] = useState('09:00');
   const [outT, setOutT] = useState('18:00');
+  const [breakH, setBreakH] = useState('');
+
+  // 출퇴근 입력 시 법정 휴게시간 자동 제안
+  const rawH = (() => {
+    if (!inT || !outT) return 0;
+    const [ih,im] = inT.split(':').map(Number);
+    const [oh,om] = outT.split(':').map(Number);
+    return (oh+om/60)-(ih+im/60);
+  })();
+  const suggestedBreak = legalBreakH(rawH);
+  const effectiveBreak = breakH !== '' ? Number(breakH) : suggestedBreak;
+  const netH = Math.max(0, rawH - effectiveBreak);
 
   return (
     <div>
@@ -755,8 +778,35 @@ function AttendanceForm({ data, selectedDate, onSave, onCancel }) {
           <Field label="출근 시각" type="time" value={inT} onChange={setInT} />
           <Field label="퇴근 시각" type="time" value={outT} onChange={setOutT} />
 
+          {/* 휴게시간 */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>
+              휴게시간 (시간)
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="number" value={breakH} step="0.5" min="0"
+                     onChange={e => setBreakH(e.target.value)}
+                     placeholder={`${suggestedBreak} (법정 기본값)`}
+                     style={{
+                       flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
+                       border: `1.5px solid ${C.border}`, borderRadius: 8,
+                       background: '#fff', fontFamily: 'inherit', outline: 'none'
+                     }} />
+              {breakH === '' && suggestedBreak > 0 && (
+                <Btn size="sm" variant="secondary"
+                     onClick={() => setBreakH(String(suggestedBreak))}>
+                  {suggestedBreak}h 적용
+                </Btn>
+              )}
+            </div>
+            {rawH > 0 && (
+              <BreakGuide rawH={rawH} breakH={effectiveBreak} netH={netH} />
+            )}
+          </div>
+
           <Btn onClick={() => onSave({
             workerId, date: selectedDate, inT, outT,
+            breakH: effectiveBreak,
             status: 'approved', source: 'employer'
           })} style={{ width: '100%', marginTop: 8 }} size="lg">
             ✓ 즉시 승인 저장
@@ -771,6 +821,17 @@ function SimulateWorkerInput({ data, selectedDate, onSubmit, onCancel }) {
   const [workerId, setWorkerId] = useState(data.workers[0]?.id || '');
   const [inT, setInT] = useState('09:00');
   const [outT, setOutT] = useState('18:00');
+  const [breakH, setBreakH] = useState('');
+
+  const rawH = (() => {
+    if (!inT || !outT) return 0;
+    const [ih,im] = inT.split(':').map(Number);
+    const [oh,om] = outT.split(':').map(Number);
+    return (oh+om/60)-(ih+im/60);
+  })();
+  const suggestedBreak = legalBreakH(rawH);
+  const effectiveBreak = breakH !== '' ? Number(breakH) : suggestedBreak;
+  const netH = Math.max(0, rawH - effectiveBreak);
 
   return (
     <div>
@@ -779,7 +840,6 @@ function SimulateWorkerInput({ data, selectedDate, onSubmit, onCancel }) {
         <Card style={{ background: '#eff6ff', borderColor: '#bfdbfe', marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: C.blue, lineHeight: 1.6 }}>
             실제 앱에서는 근로자가 본인 폰에서 입력합니다.<br/>
-            여기서는 데모를 위해 사업주 화면에서 시뮬레이션합니다.<br/>
             제출 시 <strong>"미확인" 상태</strong>로 들어가고, 사업주가 승인해야 확정됩니다.
           </div>
         </Card>
@@ -797,12 +857,52 @@ function SimulateWorkerInput({ data, selectedDate, onSubmit, onCancel }) {
           <Field label="내 출근 시각" type="time" value={inT} onChange={setInT} />
           <Field label="내 퇴근 시각" type="time" value={outT} onChange={setOutT} />
 
-          <Btn onClick={() => onSubmit(workerId, inT, outT)}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>
+              휴게시간 (시간)
+            </div>
+            <input type="number" value={breakH} step="0.5" min="0"
+                   onChange={e => setBreakH(e.target.value)}
+                   placeholder={`${suggestedBreak} (법정 기본값)`}
+                   style={{
+                     width: '100%', padding: '10px 12px', fontSize: 13, color: C.t1,
+                     border: `1.5px solid ${C.border}`, borderRadius: 8,
+                     background: '#fff', fontFamily: 'inherit', outline: 'none'
+                   }} />
+            {rawH > 0 && (
+              <BreakGuide rawH={rawH} breakH={effectiveBreak} netH={netH} />
+            )}
+          </div>
+
+          <Btn onClick={() => onSubmit(workerId, inT, outT, effectiveBreak)}
                style={{ width: '100%', marginTop: 8 }} size="lg">
             📤 사업주에게 제출
           </Btn>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/* 휴게시간 안내 컴포넌트 */
+function BreakGuide({ rawH, breakH, netH }) {
+  const legal = legalBreakH(rawH);
+  const isUnder = breakH < legal && rawH >= 4;
+  return (
+    <div style={{
+      marginTop: 6, padding: '7px 10px', borderRadius: 7, fontSize: 10,
+      lineHeight: 1.6,
+      background: isUnder ? '#fff5f5' : '#f0fdf4',
+      borderColor: isUnder ? '#fed7d7' : '#bbf7d0',
+      border: '1px solid',
+      color: isUnder ? C.red : C.green
+    }}>
+      {isUnder
+        ? `⚠️ ${rawH.toFixed(1)}h 근무 시 법정 휴게 ${legal}h 이상 필요 (근기법 §54)`
+        : `✓ 실 근무시간: ${netH.toFixed(1)}h (총 ${rawH.toFixed(1)}h - 휴게 ${breakH}h)`}
+      {rawH >= 4 && <span style={{ marginLeft: 6, opacity: 0.8 }}>
+        · 법정기준: {rawH >= 8 ? '8h↑→1h' : '4h↑→30분'}
+      </span>}
     </div>
   );
 }
@@ -828,8 +928,11 @@ function PayrollTab({ data }) {
     recs.forEach(r => {
       const [inH, inM] = r.inT.split(':').map(Number);
       const [outH, outM] = r.outT.split(':').map(Number);
-      const hours = (outH + outM/60) - (inH + inM/60);
-      if (hours <= 0) return;
+      const raw = (outH + outM/60) - (inH + inM/60);
+      if (raw <= 0) return;
+      const brk = (r.breakH !== undefined && r.breakH !== null && r.breakH !== '')
+        ? Number(r.breakH) : legalBreakH(raw);
+      const hours = Math.max(0, raw - brk);
       totalH += hours;
       const sj = Math.min(hours, worker.sojeongH);
       sojeongTotal += sj;
@@ -1712,6 +1815,7 @@ function PersonalRecord({ data, setData }) {
   const [manDate, setManDate] = useState(today);
   const [manIn, setManIn]   = useState('09:00');
   const [manOut, setManOut] = useState('18:00');
+  const [manBreak, setManBreak] = useState('');
 
   /* ---- 원터치 출근 ---- */
   const handleClockIn = async () => {
@@ -1747,9 +1851,14 @@ function PersonalRecord({ data, setData }) {
   const handleManualSave = () => {
     const existing = p.records.find(r => r.date === manDate);
     if (existing && !confirm('이 날짜 기록이 있어요. 덮어쓸까요?')) return;
+    const [ih,im] = manIn.split(':').map(Number);
+    const [oh,om] = manOut.split(':').map(Number);
+    const rawH = (oh+om/60)-(ih+im/60);
+    const brk = manBreak !== '' ? Number(manBreak) : legalBreakH(rawH);
     upsertRecord({
       id: existing?.id || ('pr' + Date.now()),
       date: manDate, inT: manIn, outT: manOut,
+      breakH: brk,
       inGPS: null, outGPS: null,
     });
     setShowManual(false);
@@ -1931,12 +2040,29 @@ function PersonalRecord({ data, setData }) {
         {showManual && (
           <Card style={{ marginBottom: 14, background: '#f9fafb' }}>
             <div style={{ fontSize: 11, color: C.t3, marginBottom: 10, lineHeight: 1.6 }}>
-              ※ 소급 입력은 GPS가 기록되지 않아 증거력이 낮습니다.<br/>
-              가능하면 매일 실시간으로 기록하세요.
+              ※ 소급 입력은 GPS가 기록되지 않아 증거력이 낮습니다.
             </div>
             <Field label="날짜" type="date" value={manDate} onChange={setManDate} />
             <Field label="출근 시각" type="time" value={manIn} onChange={setManIn} />
             <Field label="퇴근 시각" type="time" value={manOut} onChange={setManOut} />
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>
+                휴게시간 (시간)
+              </div>
+              <input type="number" value={manBreak} step="0.5" min="0"
+                     onChange={e => setManBreak(e.target.value)}
+                     placeholder={(() => {
+                       if (!manIn || !manOut) return '0';
+                       const [ih,im] = manIn.split(':').map(Number);
+                       const [oh,om] = manOut.split(':').map(Number);
+                       return String(legalBreakH((oh+om/60)-(ih+im/60))) + ' (법정 기본값)';
+                     })()}
+                     style={{
+                       width: '100%', padding: '10px 12px', fontSize: 13, color: C.t1,
+                       border: `1.5px solid ${C.border}`, borderRadius: 8,
+                       background: '#fff', fontFamily: 'inherit', outline: 'none'
+                     }} />
+            </div>
             <Btn onClick={handleManualSave}
                  style={{ width: '100%', marginTop: 4,
                           background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)' }}
@@ -2438,11 +2564,23 @@ function FAQItem({ q, a }) {
 }
 
 /* ---- 개인 모드 유틸 ---- */
+/* 법정 기본 휴게시간 계산 (근기법 §54) */
+function legalBreakH(totalH) {
+  if (totalH >= 8) return 1;
+  if (totalH >= 4) return 0.5;
+  return 0;
+}
+
+/* 실 근무시간 = 출퇴근 차이 - 휴게시간 */
 function calcDayHours(r) {
   if (!r.inT || !r.outT) return 0;
   const [ih, im] = r.inT.split(':').map(Number);
   const [oh, om] = r.outT.split(':').map(Number);
-  return (oh + om/60) - (ih + im/60);
+  const raw = (oh + om/60) - (ih + im/60);
+  if (raw <= 0) return 0;
+  const brk = (r.breakH !== undefined && r.breakH !== null && r.breakH !== '')
+    ? Number(r.breakH) : legalBreakH(raw);
+  return Math.max(0, raw - brk);
 }
 
 function calcPersonalPay(records, p) {

@@ -83,17 +83,27 @@ const seedAttendance = [
 /* ============================================================
    localStorage 헬퍼
 ============================================================ */
-const LS_KEY = 'nomugil_demo_v1';
+const LS_KEY = 'nomugil_demo_v2';
 function loadData() {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (raw) return JSON.parse(raw);
   } catch (e) {}
   return {
+    mode: null,           // null | 'employer' | 'personal'
     bizName: '○○카페',
     workers: seedWorkers,
     attendance: seedAttendance,
     industry: 'service',
+    // 개인 기록 모드 데이터
+    personal: {
+      name: '',
+      workplace: '',
+      hourly: 10320,
+      sojeongH: 8,
+      records: [],        // [{id, date, inT, outT, breakH}]
+      actualReceived: [], // [{id, month, amount}]
+    },
   };
 }
 function saveData(data) {
@@ -235,7 +245,7 @@ function BottomNav({ tab, setTab }) {
 /* ============================================================
    홈 탭
 ============================================================ */
-function HomeTab({ data, setTab }) {
+function HomeTab({ data, setTab, setData }) {
   const pendingCount = data.attendance.filter(a => a.status === 'pending').length;
   const activeWorkers = data.workers.length;
 
@@ -329,6 +339,14 @@ function HomeTab({ data, setTab }) {
             데이터는 기기 내(localStorage)에만 저장됩니다.<br/>
             샘플 근로자 3명과 오늘 출퇴근 기록이 미리 들어있습니다.
           </div>
+          <Btn variant="ghost" size="sm" style={{ width: '100%', marginTop: 10 }}
+               onClick={() => {
+                 if (confirm('모드 선택 화면으로 돌아갈까요? (데이터는 유지됩니다)')) {
+                   setData({ ...data, mode: null });
+                 }
+               }}>
+            🔄 모드 변경 (근로자 모드 체험)
+          </Btn>
         </Card>
       </div>
     </div>
@@ -1222,6 +1240,728 @@ function DiagnosisTab({ data }) {
 }
 
 /* ============================================================
+   개인 기록 모드 (근로자 본인용)
+============================================================ */
+function PersonalApp({ data, setData }) {
+  const [tab, setTab] = useState('home');
+  const p = data.personal;
+
+  // 초기 정보 미입력 시 설정 화면
+  if (!p.name || !p.workplace) {
+    return <PersonalSetup data={data} setData={setData} />;
+  }
+
+  return (
+    <div>
+      {tab === 'home' && <PersonalHome data={data} setData={setData} setTab={setTab} />}
+      {tab === 'record' && <PersonalRecord data={data} setData={setData} />}
+      {tab === 'pay' && <PersonalPayCheck data={data} setData={setData} />}
+      {tab === 'help' && <PersonalHelp data={data} setData={setData} />}
+      <PersonalNav tab={tab} setTab={setTab} />
+    </div>
+  );
+}
+
+function PersonalNav({ tab, setTab }) {
+  const tabs = [
+    { k: 'home', icon: '🏠', label: '홈' },
+    { k: 'record', icon: '🕐', label: '출퇴근' },
+    { k: 'pay', icon: '💰', label: '내 임금' },
+    { k: 'help', icon: '❓', label: '도움말' },
+  ];
+  return (
+    <div style={{
+      position: 'fixed', bottom: 0, left: 0, right: 0,
+      background: '#fff', borderTop: `1px solid ${C.border}`,
+      boxShadow: '0 -2px 12px rgba(30,50,90,0.08)',
+      display: 'flex', justifyContent: 'space-around',
+      padding: '8px 0 12px', zIndex: 100,
+      maxWidth: 600, margin: '0 auto'
+    }}>
+      {tabs.map(t => (
+        <button key={t.k} onClick={() => setTab(t.k)} style={{
+          background: 'transparent', border: 'none',
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          gap: 3, cursor: 'pointer', padding: '4px 12px',
+          color: tab === t.k ? C.blue : C.t3, fontFamily: 'inherit'
+        }}>
+          <span style={{ fontSize: 20 }}>{t.icon}</span>
+          <span style={{ fontSize: 10, fontWeight: tab === t.k ? 800 : 600 }}>{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 초기 설정 ---- */
+function PersonalSetup({ data, setData }) {
+  const [form, setForm] = useState({
+    name: data.personal.name || '',
+    workplace: data.personal.workplace || '',
+    hourly: data.personal.hourly || 10320,
+    sojeongH: data.personal.sojeongH || 8,
+  });
+
+  const save = () => {
+    if (!form.name || !form.workplace) {
+      alert('이름과 일하는 곳을 입력해주세요');
+      return;
+    }
+    setData({ ...data, personal: { ...data.personal, ...form } });
+  };
+
+  return (
+    <div>
+      <Header title="내 정보 입력"
+              subtitle="혼자만 보는 기록입니다"
+              onBack={() => setData({ ...data, mode: null })} />
+      <div style={{ padding: 16 }}>
+        <div style={{
+          background: '#eff6ff', border: '1px solid #bfdbfe',
+          borderRadius: 10, padding: 12, marginBottom: 14,
+          fontSize: 11, color: C.t2, lineHeight: 1.6
+        }}>
+          💡 사장님과 상관없이 본인이 직접 기록하는 모드입니다.<br/>
+          입력한 정보는 <strong>본인 휴대폰에만 저장</strong>되며,
+          나중에 임금 분쟁이 생겼을 때 증거자료로 쓸 수 있습니다.
+        </div>
+
+        <Card>
+          <Field label="이름 (별명도 OK)" value={form.name}
+                 onChange={v => setForm({ ...form, name: v })} placeholder="홍길동" />
+          <Field label="일하는 곳" value={form.workplace}
+                 onChange={v => setForm({ ...form, workplace: v })}
+                 placeholder="○○카페 / ○○편의점 등" />
+          <Field label="시급 (모르면 그대로 두세요)" type="number" value={form.hourly}
+                 onChange={v => setForm({ ...form, hourly: Number(v) })} />
+          <div style={{ fontSize: 10, color: C.t3, marginTop: -8, marginBottom: 10 }}>
+            ※ 2026년 최저시급: 10,320원 — 이보다 낮으면 위법
+          </div>
+          <Field label="1일 약속한 근로시간 (h)" type="number" value={form.sojeongH}
+                 onChange={v => setForm({ ...form, sojeongH: Number(v) })} />
+
+          <Btn onClick={save} style={{ width: '100%', marginTop: 8,
+                  background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)' }} size="lg">
+            ✓ 시작하기
+          </Btn>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 홈 ---- */
+function PersonalHome({ data, setData, setTab }) {
+  const p = data.personal;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const thisMonthRecs = p.records.filter(r => r.date.startsWith(thisMonth) && r.outT);
+
+  // 이번 달 받아야 할 임금
+  const calc = calcPersonalPay(thisMonthRecs, p);
+
+  return (
+    <div>
+      <div style={{
+        background: 'linear-gradient(180deg,#ffffff 0%,#f4f8fd 100%)',
+        borderBottom: '1px solid rgba(184,146,42,0.12)',
+        padding: '14px 16px', position: 'sticky', top: 0, zIndex: 10,
+        boxShadow: '0 2px 12px rgba(30,50,90,0.06)',
+        display: 'flex', alignItems: 'center', gap: 10
+      }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 900, fontSize: 15,
+            background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'
+          }}>👤 {p.name}님의 기록</div>
+          <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>{p.workplace}</div>
+        </div>
+        <button onClick={() => {
+          if (confirm('모드 선택 화면으로 돌아갈까요? (기록은 그대로 유지됩니다)')) {
+            setData({ ...data, mode: null });
+          }
+        }} style={{
+          background: 'transparent', border: `1px solid ${C.border}`,
+          color: C.t3, fontSize: 10, padding: '4px 8px',
+          borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit'
+        }}>모드변경</button>
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {/* 이번 달 카드 */}
+        <Card style={{
+          background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+          color: '#fff', border: 'none', marginBottom: 14
+        }}>
+          <div style={{ fontSize: 11, opacity: 0.85 }}>이번 달 받아야 할 임금</div>
+          <div style={{ fontSize: 26, fontWeight: 900, marginTop: 4 }}>
+            {calc.total.toLocaleString()}<span style={{ fontSize: 12 }}>원</span>
+          </div>
+          <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+            근무 {calc.days}일 · 총 {calc.totalH}시간 · 주휴 포함
+          </div>
+        </Card>
+
+        {/* 최저임금 체크 */}
+        {(() => {
+          if (calc.totalH === 0) return null;
+          const effHourly = calc.total / parseFloat(calc.totalH);
+          const minOK = effHourly >= 10320 || p.hourly >= 10320;
+          if (!minOK) {
+            return (
+              <Card style={{ background: '#fff5f5', borderColor: '#fed7d7', marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: C.red, marginBottom: 4 }}>
+                  ⚠️ 최저임금 미달
+                </div>
+                <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6 }}>
+                  시급 {p.hourly.toLocaleString()}원 / 2026년 최저시급 10,320원<br/>
+                  최저임금법 위반 가능성이 있어요.
+                </div>
+              </Card>
+            );
+          }
+          return null;
+        })()}
+
+        {/* 빠른 실행 */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+          <Btn variant="secondary" size="lg" onClick={() => setTab('record')}>
+            🕐 오늘 출퇴근
+          </Btn>
+          <Btn variant="secondary" size="lg" onClick={() => setTab('pay')}>
+            💰 임금 비교
+          </Btn>
+        </div>
+
+        {/* 최근 근무 기록 */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.t2,
+                      marginBottom: 8, padding: '0 2px' }}>
+          📅 최근 근무
+        </div>
+        {p.records.length === 0 ? (
+          <Card style={{ textAlign: 'center', padding: 24, color: C.t3 }}>
+            <div style={{ fontSize: 30, marginBottom: 6 }}>📝</div>
+            <div style={{ fontSize: 12 }}>아직 기록이 없습니다</div>
+            <div style={{ fontSize: 10, marginTop: 4 }}>출퇴근 탭에서 오늘 근무를 기록해보세요</div>
+          </Card>
+        ) : (
+          p.records.slice().reverse().slice(0, 5).map(r => (
+            <Card key={r.id} style={{ marginBottom: 8, padding: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between',
+                            alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{r.date}</div>
+                  <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+                    {r.inT} ~ {r.outT || '진행중'}
+                  </div>
+                </div>
+                {r.outT && (
+                  <div style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>
+                    {calcDayHours(r).toFixed(1)}h
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))
+        )}
+
+        {/* 안내 */}
+        <Card style={{ marginTop: 14, background: '#fffbeb', borderColor: '#fde68a' }}>
+          <div style={{ fontSize: 11, color: C.goldD, lineHeight: 1.6 }}>
+            💡 <strong>이 기록은 분쟁 시 증거가 됩니다.</strong><br/>
+            매일 잊지 말고 기록하세요. 사장님이 동의하지 않아도 본인이 한 일은 본인이 기록할 권리가 있습니다.
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 출퇴근 기록 ---- */
+function PersonalRecord({ data, setData }) {
+  const p = data.personal;
+  const [date, setDate] = useState(todayStr());
+  const [inT, setInT] = useState('09:00');
+  const [outT, setOutT] = useState('18:00');
+
+  // 이 날짜에 이미 기록이 있는지
+  const existing = p.records.find(r => r.date === date);
+
+  const save = () => {
+    const newRec = { id: 'pr' + Date.now(), date, inT, outT };
+    let records = p.records;
+    if (existing) {
+      if (!confirm('이미 이 날짜 기록이 있어요. 덮어쓸까요?')) return;
+      records = records.filter(r => r.id !== existing.id);
+    }
+    records = [...records, newRec].sort((a, b) => a.date.localeCompare(b.date));
+    setData({ ...data, personal: { ...p, records } });
+    alert('기록되었습니다!');
+  };
+
+  const clockNow = (which) => {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const t = `${hh}:${mm}`;
+    if (which === 'in') setInT(t);
+    else setOutT(t);
+  };
+
+  const del = (id) => {
+    if (!confirm('이 기록을 삭제할까요?')) return;
+    setData({ ...data, personal: { ...p, records: p.records.filter(r => r.id !== id) } });
+  };
+
+  return (
+    <div>
+      <Header title="출퇴근 기록" subtitle={`${p.name}님 본인 기록`} />
+      <div style={{ padding: 16 }}>
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: C.t1, marginBottom: 10 }}>
+            📝 오늘 또는 과거 기록
+          </div>
+          <Field label="날짜" type="date" value={date} onChange={setDate} />
+
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>출근 시각</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input type="time" value={inT} onChange={e => setInT(e.target.value)} style={{
+                flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
+                border: `1.5px solid ${C.border}`, borderRadius: 8,
+                background: '#fff', fontFamily: 'inherit', outline: 'none'
+              }} />
+              <Btn variant="secondary" size="sm" onClick={() => clockNow('in')}>지금</Btn>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 4 }}>퇴근 시각</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input type="time" value={outT} onChange={e => setOutT(e.target.value)} style={{
+                flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
+                border: `1.5px solid ${C.border}`, borderRadius: 8,
+                background: '#fff', fontFamily: 'inherit', outline: 'none'
+              }} />
+              <Btn variant="secondary" size="sm" onClick={() => clockNow('out')}>지금</Btn>
+            </div>
+          </div>
+
+          <Btn onClick={save} style={{
+            width: '100%', marginTop: 6,
+            background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)'
+          }} size="lg">
+            {existing ? '✓ 수정 저장' : '✓ 저장하기'}
+          </Btn>
+        </Card>
+
+        {/* 누적 기록 목록 */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.t2,
+                      marginBottom: 8, padding: '0 2px' }}>
+          📋 전체 기록 ({p.records.length}건)
+        </div>
+        {p.records.length === 0 ? (
+          <Card style={{ textAlign: 'center', padding: 24, color: C.t3, fontSize: 12 }}>
+            기록이 없습니다
+          </Card>
+        ) : (
+          p.records.slice().reverse().map(r => (
+            <Card key={r.id} style={{ marginBottom: 6, padding: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between',
+                            alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{r.date}</div>
+                  <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
+                    {r.inT} ~ {r.outT} · {calcDayHours(r).toFixed(1)}h
+                  </div>
+                </div>
+                <button onClick={() => del(r.id)} style={{
+                  background: 'transparent', border: 'none', color: C.red,
+                  fontSize: 11, cursor: 'pointer', fontFamily: 'inherit'
+                }}>삭제</button>
+              </div>
+            </Card>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 임금 비교 ---- */
+function PersonalPayCheck({ data, setData }) {
+  const p = data.personal;
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [actualInput, setActualInput] = useState('');
+
+  const monthRecs = p.records.filter(r => r.date.startsWith(month) && r.outT);
+  const calc = calcPersonalPay(monthRecs, p);
+
+  const actualEntry = p.actualReceived.find(a => a.month === month);
+  const actual = actualEntry?.amount || 0;
+  const diff = actual - calc.total;
+
+  const saveActual = () => {
+    const amt = Number(actualInput.replace(/,/g, ''));
+    if (!amt) return;
+    const others = p.actualReceived.filter(a => a.month !== month);
+    setData({
+      ...data,
+      personal: { ...p, actualReceived: [...others, { month, amount: amt }] }
+    });
+    setActualInput('');
+  };
+
+  return (
+    <div>
+      <Header title="내 임금 확인" subtitle="받아야 할 금액 vs 실제 받은 금액" />
+      <div style={{ padding: 16 }}>
+        <Card style={{ marginBottom: 14, padding: 10 }}>
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)}
+                 style={{
+                   width: '100%', padding: '8px', fontSize: 13, fontWeight: 700,
+                   color: C.t1, border: `1.5px solid ${C.border}`, borderRadius: 7,
+                   fontFamily: 'inherit', outline: 'none', textAlign: 'center'
+                 }} />
+        </Card>
+
+        {/* 받아야 할 임금 상세 */}
+        <Card style={{ marginBottom: 14,
+                       background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+                       color: '#fff', border: 'none' }}>
+          <div style={{ fontSize: 11, opacity: 0.85 }}>받아야 할 임금 (계산값)</div>
+          <div style={{ fontSize: 24, fontWeight: 900, marginTop: 4 }}>
+            {calc.total.toLocaleString()}<span style={{ fontSize: 12 }}>원</span>
+          </div>
+          <div style={{ fontSize: 10, opacity: 0.85, marginTop: 8, lineHeight: 1.7 }}>
+            기본급 {calc.basePay.toLocaleString()}원<br/>
+            {calc.overtimePay > 0 && `연장수당 ${calc.overtimePay.toLocaleString()}원\n`}
+            {calc.overtimePay > 0 && <br/>}
+            주휴수당 {calc.weeklyHoliday.toLocaleString()}원<br/>
+            (근무 {calc.days}일 · 총 {calc.totalH}h)
+          </div>
+        </Card>
+
+        {/* 실제 받은 금액 입력 */}
+        <Card style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: C.t1, marginBottom: 10 }}>
+            💵 실제로 받은 금액 입력
+          </div>
+          {actual > 0 ? (
+            <div>
+              <div style={{ fontSize: 11, color: C.t3, marginBottom: 4 }}>
+                저장된 금액
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 900, color: C.t1, marginBottom: 10 }}>
+                {actual.toLocaleString()}원
+              </div>
+              <Btn variant="secondary" size="sm" onClick={() => {
+                setActualInput(String(actual));
+                setData({
+                  ...data,
+                  personal: {
+                    ...p,
+                    actualReceived: p.actualReceived.filter(a => a.month !== month)
+                  }
+                });
+              }}>수정</Btn>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input type="text" value={actualInput}
+                       onChange={e => setActualInput(e.target.value)}
+                       placeholder="예: 1,500,000"
+                       style={{
+                         flex: 1, padding: '10px 12px', fontSize: 13, color: C.t1,
+                         border: `1.5px solid ${C.border}`, borderRadius: 8,
+                         background: '#fff', fontFamily: 'inherit', outline: 'none'
+                       }} />
+                <Btn onClick={saveActual} size="md"
+                     style={{ background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)' }}>
+                  저장
+                </Btn>
+              </div>
+              <div style={{ fontSize: 10, color: C.t3, marginTop: 6 }}>
+                통장에 실제 입금된 세후 금액을 입력하세요
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {/* 비교 결과 */}
+        {actual > 0 && (
+          <Card style={{
+            background: diff < -10000 ? '#fff5f5' :
+                       diff > 10000 ? '#f0fdf4' : '#fffbeb',
+            borderColor: diff < -10000 ? '#fed7d7' :
+                        diff > 10000 ? '#bbf7d0' : '#fde68a',
+            marginBottom: 14
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 900,
+                          color: diff < -10000 ? C.red : diff > 10000 ? C.green : C.goldD,
+                          marginBottom: 6 }}>
+              {diff < -10000 ? '⚠️ 미지급 의심' :
+               diff > 10000 ? '✓ 더 받았어요' : '✓ 거의 일치'}
+            </div>
+            <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.7 }}>
+              받아야 할 금액: {calc.total.toLocaleString()}원<br/>
+              실제 받은 금액: {actual.toLocaleString()}원<br/>
+              <strong style={{
+                color: diff < -10000 ? C.red : diff > 10000 ? C.green : C.t1
+              }}>
+                차이: {diff >= 0 ? '+' : ''}{diff.toLocaleString()}원
+              </strong>
+            </div>
+            {diff < -10000 && (
+              <div style={{ marginTop: 10, padding: 10,
+                            background: '#fff', borderRadius: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.red, marginBottom: 4 }}>
+                  💡 이렇게 해보세요
+                </div>
+                <div style={{ fontSize: 10, color: C.t2, lineHeight: 1.7 }}>
+                  1. 먼저 사장님께 조용히 확인 요청 (실수일 수 있어요)<br/>
+                  2. 4대보험·세금 공제로 차이가 날 수 있으니 명세서 요청<br/>
+                  3. 그래도 차이가 크면 → <strong>고용노동부 1350</strong>으로 상담<br/>
+                  4. 본 앱의 출퇴근 기록은 진정 시 증거자료가 됩니다
+                </div>
+              </div>
+            )}
+          </Card>
+        )}
+
+        {/* 계산 안내 */}
+        <div style={{ fontSize: 10, color: C.t3, padding: 10, lineHeight: 1.7,
+                      background: '#f9fafb', borderRadius: 8 }}>
+          ※ 받아야 할 임금은 세전 금액 기준입니다. 실수령액과 비교 시 4대보험·세금 공제(약 9~10%)를 감안하세요.<br/>
+          ※ 본 계산은 추정치이며, 실제 사업장 사정에 따라 다를 수 있습니다.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- 개인 모드: 도움말 / 신고 안내 ---- */
+function PersonalHelp({ data, setData }) {
+  return (
+    <div>
+      <Header title="도움말 · 신고 안내" />
+      <div style={{ padding: 16 }}>
+        {/* 긴급 연락처 */}
+        <Card style={{ marginBottom: 14,
+                       background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+                       color: '#fff', border: 'none' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85, marginBottom: 6 }}>
+            📞 임금체불·노동상담
+          </div>
+          <a href="tel:1350" style={{ textDecoration: 'none', color: '#fff' }}>
+            <div style={{ fontSize: 28, fontWeight: 900 }}>1350</div>
+          </a>
+          <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+            고용노동부 고객상담센터 · 평일 09~18시 · 무료
+          </div>
+        </Card>
+
+        {/* FAQ */}
+        <FAQItem
+          q="❓ 사장님이 알면 어떡하죠?"
+          a="이 앱의 기록은 본인 휴대폰에만 저장되며 사장님께 알려지지 않습니다. 신고를 결심하지 않는 한, 단순 기록만으로는 아무 일도 일어나지 않습니다."
+        />
+        <FAQItem
+          q="❓ 내 기록이 증거가 되나요?"
+          a="네. 노동청 진정 시 출퇴근 시간 기록은 핵심 증거자료입니다. 매일 꾸준히 기록한 자료가 추후 사장님이 부인할 때도 유효합니다."
+        />
+        <FAQItem
+          q="❓ 최저임금이 얼마예요?"
+          a="2026년 최저시급은 10,320원입니다. 월 환산하면 약 2,156,880원 (주 40시간·주휴 포함 209시간 기준)."
+        />
+        <FAQItem
+          q="❓ 주휴수당이 뭔가요?"
+          a="주 15시간 이상 일하고 한 주를 개근하면, 일하지 않은 하루치(최대 8h) 임금을 추가로 받을 권리가 있어요. 시급제·일급제·아르바이트도 모두 적용됩니다."
+        />
+        <FAQItem
+          q="❓ 4대보험·세금 공제는?"
+          a="약 9~10% 정도 공제됩니다 (국민연금 4.5% + 건강보험 3.5% + 고용보험 0.9% + 소득세 등). 일용직(월 60시간 미만)은 일부만 공제."
+        />
+        <FAQItem
+          q="❓ 근로계약서 없이 일해도 되나요?"
+          a="아니요. 근로계약서 미작성은 사업주에게 500만원 이하 벌금이 부과됩니다 (근기법 §17·§114). 계약서 요구는 근로자의 정당한 권리입니다."
+        />
+
+        {/* 모드 변경 */}
+        <Card style={{ marginTop: 14 }}>
+          <Btn variant="secondary" size="lg" style={{ width: '100%' }}
+               onClick={() => {
+                 if (confirm('모드 선택 화면으로 돌아갈까요? (기록은 그대로 유지됩니다)')) {
+                   setData({ ...data, mode: null });
+                 }
+               }}>
+            🔄 모드 변경 (사업주 모드로)
+          </Btn>
+          <div style={{ fontSize: 10, color: C.t3, marginTop: 8, textAlign: 'center' }}>
+            모드를 바꿔도 기록은 유지됩니다
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function FAQItem({ q, a }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card style={{ marginBottom: 8, padding: 0, overflow: 'hidden' }}>
+      <div onClick={() => setOpen(!open)} style={{
+        padding: 12, cursor: 'pointer',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.t1 }}>{q}</div>
+        <div style={{ color: C.t3, fontSize: 14 }}>{open ? '−' : '+'}</div>
+      </div>
+      {open && (
+        <div style={{ padding: '0 12px 12px',
+                      fontSize: 11, color: C.t2, lineHeight: 1.7 }}>
+          {a}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---- 개인 모드 유틸 ---- */
+function calcDayHours(r) {
+  if (!r.inT || !r.outT) return 0;
+  const [ih, im] = r.inT.split(':').map(Number);
+  const [oh, om] = r.outT.split(':').map(Number);
+  return (oh + om/60) - (ih + im/60);
+}
+
+function calcPersonalPay(records, p) {
+  let totalH = 0, sojeongTotal = 0, overtimeTotal = 0;
+  records.forEach(r => {
+    const h = calcDayHours(r);
+    if (h <= 0) return;
+    totalH += h;
+    const sj = Math.min(h, p.sojeongH);
+    sojeongTotal += sj;
+    overtimeTotal += Math.max(0, h - p.sojeongH);
+  });
+  const basePay = sojeongTotal * p.hourly;
+  const overtimePay = overtimeTotal * p.hourly * 1.5;
+  const weeks = Math.floor(records.length / 5);
+  const weeklyHoliday = weeks * Math.min((p.sojeongH * 5 / 40) * 8, 8) * p.hourly;
+  const total = basePay + overtimePay + weeklyHoliday;
+  return {
+    days: records.length,
+    totalH: totalH.toFixed(1),
+    sojeongTotal: sojeongTotal.toFixed(1),
+    overtimeTotal: overtimeTotal.toFixed(1),
+    basePay: Math.round(basePay),
+    overtimePay: Math.round(overtimePay),
+    weeklyHoliday: Math.round(weeklyHoliday),
+    total: Math.round(total),
+  };
+}
+
+/* ============================================================
+   모드 선택 화면 (첫 진입)
+============================================================ */
+function ModeSelect({ onSelect }) {
+  return (
+    <div>
+      <Header title="노무길잡이" subtitle="시작하기" />
+      <div style={{ padding: 20 }}>
+        <div style={{
+          textAlign: 'center', padding: '20px 10px 28px',
+          color: C.t2, fontSize: 13, lineHeight: 1.6
+        }}>
+          어떻게 사용하시겠어요?<br/>
+          <span style={{ fontSize: 11, color: C.t3 }}>(언제든 변경할 수 있습니다)</span>
+        </div>
+
+        {/* 사업주 모드 */}
+        <div onClick={() => onSelect('employer')} style={{
+          background: cardGrad,
+          border: `2px solid ${C.borderGold}`,
+          borderRadius: 14, padding: 18, marginBottom: 14,
+          boxShadow: C.shadowLg, cursor: 'pointer',
+          transition: 'all 0.15s'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 12,
+              background: goldGrad,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 24, flexShrink: 0,
+              boxShadow: '0 2px 8px rgba(184,146,42,0.3)'
+            }}>🏢</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 900, fontSize: 15, color: C.t1, marginBottom: 4 }}>
+                사업주로 시작
+              </div>
+              <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6 }}>
+                근로자 등록 · 출퇴근 승인 · 급여계산 ·<br/>
+                임금명세서 발급 · 의무진단
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' }}>
+                <Badge color="gold">계약서</Badge>
+                <Badge color="gold">출퇴근</Badge>
+                <Badge color="gold">명세서</Badge>
+                <Badge color="gold">의무진단</Badge>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 개인 기록 모드 */}
+        <div onClick={() => onSelect('personal')} style={{
+          background: cardGrad,
+          border: `2px solid ${C.border}`,
+          borderRadius: 14, padding: 18, marginBottom: 14,
+          boxShadow: C.shadow, cursor: 'pointer',
+          transition: 'all 0.15s'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 12,
+              background: 'linear-gradient(135deg,#3b6ec4,#2d5aa8)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 24, flexShrink: 0,
+              boxShadow: '0 2px 8px rgba(59,110,196,0.3)'
+            }}>👤</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 900, fontSize: 15, color: C.t1, marginBottom: 4 }}>
+                근로자로 시작 (개인 기록)
+              </div>
+              <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.6 }}>
+                내 출퇴근 기록 · 받아야 할 임금 계산 ·<br/>
+                실수령액과 비교 · 미달 시 신고 안내
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' }}>
+                <Badge color="blue">개인용</Badge>
+                <Badge color="blue">임금계산</Badge>
+                <Badge color="blue">체불 확인</Badge>
+              </div>
+              <div style={{ fontSize: 10, color: C.t3, marginTop: 8, fontStyle: 'italic' }}>
+                ※ 사장님 동의 불필요 · 본인 휴대폰에만 저장
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          marginTop: 16, padding: 12,
+          background: '#f9fafb', borderRadius: 10,
+          fontSize: 10, color: C.t3, lineHeight: 1.7, textAlign: 'center'
+        }}>
+          💡 노동청 배포 공식 노무관리 가이드 앱<br/>
+          모든 데이터는 본인 휴대폰에만 저장됩니다
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    메인 앱
 ============================================================ */
 function App() {
@@ -1230,9 +1970,20 @@ function App() {
 
   useEffect(() => { saveData(data); }, [data]);
 
+  // 모드 미선택 → 모드 선택 화면
+  if (!data.mode) {
+    return <ModeSelect onSelect={(m) => setData({ ...data, mode: m })} />;
+  }
+
+  // 개인 기록 모드
+  if (data.mode === 'personal') {
+    return <PersonalApp data={data} setData={setData} />;
+  }
+
+  // 사업주 모드 (기존)
   return (
     <div>
-      {tab === 'home' && <HomeTab data={data} setTab={setTab} />}
+      {tab === 'home' && <HomeTab data={data} setTab={setTab} setData={setData} />}
       {tab === 'workers' && <WorkersTab data={data} setData={setData} />}
       {tab === 'attendance' && <AttendanceTab data={data} setData={setData} />}
       {tab === 'payroll' && <PayrollTab data={data} />}

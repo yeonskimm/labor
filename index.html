@@ -45,10 +45,125 @@ const { useState, useEffect, useCallback, useRef, useMemo } = React;
 ============================================================ */
 const SUPA_URL = 'https://dfwuhodjxeimcbxdgalv.supabase.co';
 const SUPA_KEY = 'sb_publishable_ZvL8d2R7_IQgG2UgEeAHHg_f6kGOzPy';
-let sb;
-try { sb = window.supabase.createClient(SUPA_URL, SUPA_KEY); }
-catch(e) { console.error('Supabase init failed:', e); sb = { auth: { getSession:()=>Promise.resolve({data:{session:null}}), onAuthStateChange:(_,cb)=>{cb(null,null);return {data:{subscription:{unsubscribe:()=>{}}}}}, signOut:()=>Promise.resolve(), signInWithPassword:()=>Promise.reject(e) }, from:()=>({select:()=>Promise.reject(e),insert:()=>Promise.reject(e),update:()=>Promise.reject(e),delete:()=>Promise.reject(e),upsert:()=>Promise.reject(e)}) }; }
+/* ============================================================
+   실행 모드
+   LOCAL_MODE = true  : 회원가입·서버 없이 전체 기능 사용 (현재 설정)
+                        모든 데이터는 이 기기 localStorage에만 저장됨
+   LOCAL_MODE = false : 기존 Supabase 회원가입 방식으로 복귀
+                        (AuthScreen·Kakao OAuth·실시간 동기화 코드는
+                         아래에 그대로 보존됨 — 이 플래그만 바꾸면 됨)
+============================================================ */
+const LOCAL_MODE = true;
 
+/* ── localStorage 기반 Supabase 호환 어댑터 ──
+   앱에서 실제 사용하는 쿼리 표면만 구현:
+   from().select().eq()...order()/.single() / insert().select().single()
+   update().eq() / delete().eq() / upsert(,{onConflict}) / auth / channel  */
+function makeLocalDB(){
+  const K = t => 'ngdb_' + t;
+  const read = t => { try { return JSON.parse(localStorage.getItem(K(t)) || '[]'); } catch(_) { return []; } };
+  const write = (t, rows) => {
+    try { localStorage.setItem(K(t), JSON.stringify(rows)); }
+    catch(_) { alert('기기 저장 공간이 가득 찼습니다. 오래된 기록을 정리한 뒤 다시 시도해주세요.'); }
+  };
+  const uid = () => (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : ('L' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9));
+  const curUid = () => {
+    try { return localStorage.getItem('ng_role') === 'worker' ? 'local-worker' : 'local-owner'; }
+    catch(_) { return 'local-owner'; }
+  };
+  const same = (a, b) => {
+    if (a === b) return true;
+    if (a == null || b == null) return a == null && b == null;
+    return String(a) === String(b);
+  };
+  const hit = (row, fs) => fs.every(([k, v]) => same(row[k], v));
+
+  const from = (table) => {
+    const st = { op:'select', sel:'*', filters:[], orderBy:null, one:false, ret:false, payload:null, conflict:null };
+    const run = () => {
+      let rows = read(table);
+      if (st.op === 'insert' || st.op === 'upsert') {
+        const list = Array.isArray(st.payload) ? st.payload : [st.payload];
+        const out = [];
+        list.forEach(p => {
+          const row = { ...p };
+          if (row.id == null || row.id === '') row.id = uid();
+          if (row.created_at === undefined) row.created_at = new Date().toISOString();
+          if (table === 'personal_records' && row.user_id === undefined) row.user_id = curUid();
+          if (st.op === 'upsert' && st.conflict) {
+            const keys = st.conflict.split(',').map(s => s.trim());
+            const i = rows.findIndex(r => keys.every(k => same(r[k], row[k])));
+            if (i >= 0) { rows[i] = { ...rows[i], ...p }; out.push(rows[i]); return; }
+          }
+          rows.push(row); out.push(row);
+        });
+        write(table, rows);
+        return { data: st.one ? (out[0] || null) : (st.ret ? out : null), error: null };
+      }
+      if (st.op === 'update') {
+        rows = rows.map(r => hit(r, st.filters) ? { ...r, ...st.payload } : r);
+        write(table, rows); return { data: null, error: null };
+      }
+      if (st.op === 'delete') {
+        write(table, rows.filter(r => !hit(r, st.filters)));
+        return { data: null, error: null };
+      }
+      let data = rows.filter(r => hit(r, st.filters));
+      if (/workplaces\s*\(/.test(st.sel)) {
+        const wps = read('workplaces');
+        data = data.map(r => ({ ...r, workplaces: wps.find(w => same(w.id, r.workplace_id)) || null }));
+      }
+      if (st.orderBy) {
+        const [k, asc] = st.orderBy;
+        data = [...data].sort((a, b) => a[k] === b[k] ? 0 : ((a[k] > b[k] ? 1 : -1) * (asc ? 1 : -1)));
+      }
+      if (st.one) {
+        return data[0] ? { data: data[0], error: null }
+                       : { data: null, error: { message: '0 rows', code: 'PGRST116' } };
+      }
+      return { data, error: null };
+    };
+    const b = {
+      select(s) { if (st.op === 'select') { if (s) st.sel = s; } else st.ret = true; return b; },
+      insert(p) { st.op = 'insert'; st.payload = p; return b; },
+      update(p) { st.op = 'update'; st.payload = p; return b; },
+      upsert(p, opt) { st.op = 'upsert'; st.payload = p; st.conflict = (opt && opt.onConflict) || null; return b; },
+      delete() { st.op = 'delete'; return b; },
+      eq(k, v) { st.filters.push([k, v]); return b; },
+      order(k, o) { st.orderBy = [k, !(o && o.ascending === false)]; return b; },
+      single() { st.one = true; return b; },
+      maybeSingle() { st.one = true; return b; },
+      limit() { return b; },
+      then(res, rej) { return Promise.resolve().then(run).then(res, rej); },
+    };
+    return b;
+  };
+
+  const ch = { on() { return ch; }, subscribe() { return ch; }, unsubscribe() {} };
+  return {
+    from,
+    channel: () => ch,
+    removeChannel: () => {},
+    auth: {
+      getSession: () => Promise.resolve({ data: { session: null } }),
+      onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+      signOut: () => { try { localStorage.removeItem('ng_role'); } catch(_) {} return Promise.resolve({ error: null }); },
+      signInWithOAuth: () => Promise.resolve({ error: { message: '무가입 모드에서는 로그인 기능이 꺼져 있습니다.' } }),
+      signUp: () => Promise.resolve({ data: null, error: { message: '무가입 모드' } }),
+      signInWithPassword: () => Promise.resolve({ data: null, error: { message: '무가입 모드' } }),
+    },
+  };
+}
+
+let sb;
+if (LOCAL_MODE) {
+  sb = makeLocalDB();
+} else {
+  try { sb = window.supabase.createClient(SUPA_URL, SUPA_KEY); }
+  catch(e) { console.error('Supabase init failed:', e); sb = { auth: { getSession:()=>Promise.resolve({data:{session:null}}), onAuthStateChange:(_,cb)=>{cb(null,null);return {data:{subscription:{unsubscribe:()=>{}}}}}, signOut:()=>Promise.resolve(), signInWithPassword:()=>Promise.reject(e) }, from:()=>({select:()=>Promise.reject(e),insert:()=>Promise.reject(e),update:()=>Promise.reject(e),delete:()=>Promise.reject(e),upsert:()=>Promise.reject(e)}) }; }
+}
 
 /* ============================================================
    디자인 토큰 (사업주: 골드 / 근로자: 블루, 라이트 테마)
@@ -2659,6 +2774,10 @@ function ContractScreen({ onBack, workers, workplace, user }) {
             <div style={{background:"#ffffff",border:"1.5px solid #dde8f5",borderRadius:14,padding:18,boxShadow:"0 2px 12px rgba(30,50,90,0.05)"}}>
               <Inp f={curCt} u={upField}/>
             </div>
+            <div style={{fontSize:9.5,color:C.txt3,lineHeight:1.7,padding:'8px 4px 0'}}>
+              ※ 고용노동부 표준양식을 기초로 한 참고 서식입니다. 작성한 계약서는 근로자에게
+              반드시 서면 교부하세요(근기법 §17). 개별 사안의 법적 검토는 ☎1350 또는 공인노무사에게 확인하세요.
+            </div>
           </div>
         )}
 
@@ -2681,6 +2800,99 @@ function ContractScreen({ onBack, workers, workplace, user }) {
         )}
       </div>
     );
+}
+
+/* ============================================================
+   공통 면책 고지 (참고용 도구 — 법적 판단·자문 아님)
+============================================================ */
+function LegalNote({ style }) {
+  return (
+    <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.7, padding: '8px 4px', ...(style || {}) }}>
+      ※ 본 앱의 진단·계산·서식은 노동관계법 이해를 돕는 참고자료이며, 법적 효력이 있는
+      판단·자문이 아닙니다. 구체적 사안은 고용노동부 ☎1350 또는 관할 지방고용노동청에서 확인하세요.
+    </div>
+  );
+}
+
+/* ============================================================
+   시작 화면 (무가입 로컬 모드) — 역할 선택 + 원트랙 소개 + 이용 고지
+============================================================ */
+const TRACK_PREVIEW = [
+  { ic: '⚖️', t: '의무 자가진단',   law: '적용 법령 확인' },
+  { ic: '📄', t: '근로계약서 교부', law: '근기법 §17' },
+  { ic: '🕐', t: '출퇴근 기록',     law: '근로시간·휴게 §50·§54' },
+  { ic: '💵', t: '급여 계산',       law: '최저임금·주휴 §55' },
+  { ic: '💴', t: '임금명세서 교부', law: '근기법 §48②' },
+  { ic: '🏦', t: '퇴직금 지급',     law: '퇴직급여법 §9' },
+];
+
+function StartScreen({ onPick }) {
+  const [name, setName] = useState('');
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column',
+      padding: '32px 22px 24px', background: 'linear-gradient(180deg,#fdfbf5 0%,#f6f9fd 40%)' }}>
+
+      <div style={{ textAlign: 'center' }}>
+        <div dangerouslySetInnerHTML={{ __html: SHIELD }} />
+        <div style={{ fontFamily: "'Noto Serif KR',serif", fontWeight: 900, fontSize: 27, marginTop: 8,
+          background: goldGrad, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>노무길잡이</div>
+        <div style={{ fontSize: 12.5, color: C.t2, marginTop: 6, lineHeight: 1.6 }}>
+          채용부터 퇴직까지, <b style={{ color: C.gold }}>노동법 위반 없이 한 길로</b>
+        </div>
+      </div>
+
+      {/* 원트랙 레일 미리보기 */}
+      <div style={{ margin: '20px 0 4px', position: 'relative', padding: '2px 0 2px 30px' }}>
+        <div style={{ position: 'absolute', left: 11, top: 8, bottom: 8, width: 2,
+          background: 'linear-gradient(180deg,#e3c86e,#b8922a)', borderRadius: 1 }} />
+        {TRACK_PREVIEW.map((s, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '4.5px 0', position: 'relative' }}>
+            <div style={{ position: 'absolute', left: -26, width: 14, height: 14, borderRadius: 7,
+              background: '#fff', border: '2px solid #b8922a', fontSize: 7.5, fontWeight: 900, color: C.gold,
+              display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{i + 1}</div>
+            <span style={{ fontSize: 13 }}>{s.ic}</span>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: C.t1 }}>{s.t}</span>
+            <span style={{ fontSize: 9.5, color: C.t3, marginLeft: 'auto' }}>{s.law}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <Field label="이름 (선택 · 계약서 등에 자동 입력)" value={name} onChange={setName} placeholder="예: 홍길동" />
+      </div>
+
+      <button onClick={() => onPick('employer', name)} style={{ width: '100%', padding: '15px',
+        borderRadius: 13, border: 'none', background: goldGrad, color: '#fff', fontSize: 14.5,
+        fontWeight: 900, cursor: 'pointer', fontFamily: 'inherit',
+        boxShadow: '0 4px 16px rgba(184,146,42,0.35)' }}>
+        🏢 사업주로 시작 <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.85 }}>— 직원·계약서·급여·명세서</span>
+      </button>
+      <button onClick={() => onPick('worker', name)} style={{ width: '100%', padding: '15px',
+        borderRadius: 13, border: 'none', background: blueGrad, color: '#fff', fontSize: 14.5,
+        fontWeight: 900, cursor: 'pointer', fontFamily: 'inherit', marginTop: 10,
+        boxShadow: '0 4px 16px rgba(59,110,196,0.3)' }}>
+        👤 근로자로 시작 <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.85 }}>— 출퇴근·임금·증거 PDF</span>
+      </button>
+      <div style={{ textAlign: 'center', fontSize: 10, color: C.t3, marginTop: 8 }}>
+        두 모드는 언제든 전환할 수 있어요 (홈 우측 상단 ⇄)
+      </div>
+
+      <div style={{ marginTop: 'auto', paddingTop: 16 }}>
+        <div style={{ background: '#fff', border: `1.5px solid ${C.border}`, borderRadius: 12, padding: '12px 13px' }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: C.t2, marginBottom: 6 }}>이용 안내</div>
+          <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.75 }}>
+            · 무료이며 <b style={{ color: C.t2 }}>회원가입 없이</b> 모든 기능을 사용합니다<br/>
+            · 입력 정보(직원·출퇴근·위치·급여)는 서버로 전송되지 않고 <b style={{ color: C.t2 }}>이 기기에만
+              저장</b>됩니다. 앱·브라우저 데이터 삭제 시 기록이 사라지므로 중요한 문서는 PDF로 보관하세요<br/>
+            · 진단·계산 결과는 참고자료로, 법적 효력이 있는 판단·자문·노무대행이 아닙니다 — 확정 판단은
+              고용노동부 <a href="tel:1350" style={{ color: C.gold, fontWeight: 800, textDecoration: 'none' }}>☎1350</a>
+              ·관할 지방고용노동청<br/>
+            · 2026년 노동관계법령 기준 (최저임금 시급 10,320원)
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ============================================================
@@ -2918,13 +3130,13 @@ function EmployerHome({ user, workplace, workers, attendance, setTab, openSub })
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent'
           }}>노무길잡이 원스탑</div>
           <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
-            {workplace?.name} · {user.user_metadata?.name || user.email}
+            {workplace?.name} · {user.user_metadata?.name || user.email || '사장님'}
           </div>
         </div>
         <button onClick={logout} style={{
           background: 'transparent', border: `1px solid ${C.border}`,
           color: C.t3, fontSize: 10, padding: '4px 8px', borderRadius: 6, cursor: 'pointer'
-        }}>로그아웃</button>
+        }}>{LOCAL_MODE ? '⇄ 모드 변경' : '로그아웃'}</button>
       </div>
 
       <div style={{ padding: 16 }}>
@@ -2940,8 +3152,10 @@ function EmployerHome({ user, workplace, workers, attendance, setTab, openSub })
               초대코드: {workplace?.invite_code}
             </div>
           </div>
-          <div style={{ fontSize: 10, opacity: 0.75, marginTop: 4 }}>
-            근로자가 이 코드로 연결할 수 있습니다
+          <div style={{ fontSize: 10, opacity: 0.78, marginTop: 4, lineHeight: 1.6 }}>
+            {LOCAL_MODE
+              ? '📱 가입 없이 사용 중 — 데이터는 이 기기에만 저장됩니다 (코드는 이 기기 근로자 모드 연결용)'
+              : '근로자가 이 코드로 연결할 수 있습니다'}
           </div>
         </Card>
 
@@ -2998,16 +3212,49 @@ function EmployerHome({ user, workplace, workers, attendance, setTab, openSub })
           </Card>
         )}
 
-        {/* 빠른 실행 */}
-        <div style={{ fontSize: 12, fontWeight: 800, color: C.t2, marginBottom: 8 }}>⚡ 빠른 실행</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <Btn variant="secondary" size="lg" onClick={() => setTab('workers')}>👤 근로자</Btn>
-          <Btn variant="secondary" size="lg" onClick={() => setTab('attendance')}>🕐 출퇴근</Btn>
-          <Btn variant="secondary" size="lg" onClick={() => setTab('payroll')}>💰 급여·명세서</Btn>
-          <Btn variant="secondary" size="lg" onClick={() => openSub('diagnosis')}>⚖️ 의무진단</Btn>
-          <Btn variant="secondary" size="lg" onClick={() => openSub('contract')}>📄 근로계약서</Btn>
-          <Btn variant="secondary" size="lg" onClick={() => openSub('retire')}>🏦 퇴직금</Btn>
+        {/* 노무관리 원트랙 */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, color: C.t2 }}>🛤 노무관리 원트랙</span>
+          <span style={{ fontSize: 9.5, color: C.t3 }}>이 순서대로 하면 위반 없이 끝</span>
         </div>
+        <div style={{ position: 'relative', paddingLeft: 26 }}>
+          <div style={{ position: 'absolute', left: 11, top: 12, bottom: 12, width: 2,
+            background: 'linear-gradient(180deg,#e3c86e,#b8922a)', borderRadius: 1 }} />
+          {[
+            { n: 1, ic: '⚖️', t: '의무사항 자가진단', s: `직원 ${workers.length}명 기준 적용 법령 확인`,
+              law: '62개 항목 자동 판정', go: () => openSub('diagnosis') },
+            { n: 2, ic: '📄', t: '근로계약서 작성·교부', s: '서면으로 명시하고 1부 교부',
+              law: '근기법 §17', go: () => openSub('contract') },
+            { n: 3, ic: '👥', t: '직원 등록', s: '이름·시급·소정근로시간',
+              law: `최저임금 ${MIN_WAGE.toLocaleString()}원 자동 점검`, go: () => setTab('workers') },
+            { n: 4, ic: '🕐', t: '출퇴근 기록·확인', s: '근로자 입력 승인 또는 직접 입력',
+              law: '근로시간·휴게 §50·§54', go: () => setTab('attendance') },
+            { n: 5, ic: '💵', t: '급여 계산 → 명세서 교부', s: '기본·연장·야간·주휴 자동 분해',
+              law: '임금명세서 근기법 §48②', go: () => setTab('payroll') },
+            { n: 6, ic: '🏦', t: '퇴직금 계산·지급', s: '1년 이상 근속 시 14일 내 지급',
+              law: '퇴직급여법 §9', go: () => openSub('retire') },
+          ].map(s => (
+            <Card key={s.n} onClick={s.go}
+              style={{ marginBottom: 8, padding: '11px 12px', cursor: 'pointer', position: 'relative' }}>
+              <div style={{ position: 'absolute', left: -22, top: '50%', transform: 'translateY(-50%)',
+                width: 16, height: 16, borderRadius: 8, background: '#fff', border: '2px solid #b8922a',
+                fontSize: 8.5, fontWeight: 900, color: C.gold,
+                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{s.n}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                <span style={{ fontSize: 17 }}>{s.ic}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 800, color: C.t1 }}>{s.t}</div>
+                  <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>{s.s}</div>
+                </div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <div style={{ fontSize: 8.5, color: C.goldD, fontWeight: 700, maxWidth: 92, lineHeight: 1.4 }}>{s.law}</div>
+                  <div style={{ color: C.gold, fontSize: 14, fontWeight: 800 }}>›</div>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+        <LegalNote />
       </div>
     </div>
   );
@@ -3017,29 +3264,84 @@ function EmployerHome({ user, workplace, workers, attendance, setTab, openSub })
    사업주 — 근로자 탭
 ============================================================ */
 function WorkersTab({ user, workplace, workers, onRefresh }) {
-  const [showInvite, setShowInvite] = useState(false);
+  const [showAdd, setShowAdd] = useState(workers.length === 0);
+  const [nm, setNm] = useState('');
+  const [hr, setHr] = useState('10320');
+  const [sj, setSj] = useState('8');
+  const [saving, setSaving] = useState(false);
+
+  const addWorker = async () => {
+    if (!nm.trim()) { alert('이름을 입력해주세요'); return; }
+    const h = Number(String(hr).replace(/,/g, '')) || 0;
+    if (!h) { alert('시급을 입력해주세요'); return; }
+    if (h < MIN_WAGE && !confirm(
+      `시급 ${h.toLocaleString()}원은 2026년 최저임금(${MIN_WAGE.toLocaleString()}원)보다 낮습니다.\n` +
+      `최저임금에 미달하는 임금 약정은 그 부분이 무효이며 처벌 대상입니다(최저임금법 §6·§28).\n` +
+      `그래도 이 금액으로 저장할까요?`)) return;
+    setSaving(true);
+    await sb.from('workers').insert({
+      workplace_id: workplace.id, user_id: null,
+      name: nm.trim(), hourly: h, sojeong_h: Number(sj) || 8, status: 'approved'
+    });
+    setNm(''); setHr('10320'); setSj('8'); setSaving(false); setShowAdd(false);
+    onRefresh();
+  };
+
+  const approve = async (w) => {
+    await sb.from('workers').update({ status: 'approved' }).eq('id', w.id);
+    onRefresh();
+  };
+
+  const removeWorker = async (w) => {
+    if (!confirm(`'${w.name}' 직원과 해당 출퇴근 기록을 모두 삭제할까요?\n` +
+      `(임금 산정 근거가 사라집니다 — 필요하면 먼저 명세서·기록을 PDF로 보관하세요)`)) return;
+    await sb.from('attendance').delete().eq('worker_id', w.id);
+    await sb.from('workers').delete().eq('id', w.id);
+    onRefresh();
+  };
 
   return (
     <div>
       <Header title="근로자 관리" subtitle={`${workers.length}명 재직 중`} />
       <div style={{ padding: 16 }}>
-        <Card style={{ marginBottom: 14, background: '#eff6ff', borderColor: '#bfdbfe' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.blue, marginBottom: 4 }}>
-            📨 근로자 초대 방법
-          </div>
-          <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.7 }}>
-            1. 근로자가 앱에서 <strong>근로자로 가입</strong><br/>
-            2. "사업장 코드 입력" 선택<br/>
-            3. 코드 <strong style={{ letterSpacing: 2, color: C.gold }}>{workplace?.invite_code}</strong> 입력<br/>
-            4. 사업주가 이 화면에서 승인
-          </div>
-        </Card>
+
+        {!showAdd && (
+          <Btn size="lg" style={{ width: '100%', marginBottom: 12 }} onClick={() => setShowAdd(true)}>
+            ＋ 직원 등록
+          </Btn>
+        )}
+        {showAdd && (
+          <Card style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: C.t2, marginBottom: 10 }}>＋ 직원 등록</div>
+            <Field label="이름" value={nm} onChange={setNm} placeholder="예: 김알바" />
+            <Field label={`시급 (원) · 2026 최저임금 ${MIN_WAGE.toLocaleString()}원`} type="tel" value={hr} onChange={setHr} />
+            <Field label="1일 소정근로시간 (h) · 근로계약서에 약속한 시간" type="tel" value={sj} onChange={setSj} />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Btn style={{ flex: 1 }} onClick={addWorker} disabled={saving}>{saving ? '등록 중...' : '✓ 등록'}</Btn>
+              <Btn variant="secondary" onClick={() => setShowAdd(false)}>닫기</Btn>
+            </div>
+          </Card>
+        )}
+
+        {!LOCAL_MODE && (
+          <Card style={{ marginBottom: 14, background: '#eff6ff', borderColor: '#bfdbfe' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.blue, marginBottom: 4 }}>
+              📨 근로자 초대 방법
+            </div>
+            <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.7 }}>
+              1. 근로자가 앱에서 <strong>근로자로 가입</strong><br/>
+              2. "사업장 코드 입력" 선택<br/>
+              3. 코드 <strong style={{ letterSpacing: 2, color: C.gold }}>{workplace?.invite_code}</strong> 입력<br/>
+              4. 사업주가 이 화면에서 승인
+            </div>
+          </Card>
+        )}
 
         {workers.length === 0 ? (
           <Card style={{ textAlign: 'center', padding: 32, color: C.t3 }}>
             <div style={{ fontSize: 36, marginBottom: 8 }}>👥</div>
-            <div style={{ fontSize: 13 }}>아직 연결된 근로자가 없습니다</div>
-            <div style={{ fontSize: 11, marginTop: 4 }}>위 초대코드를 근로자와 공유하세요</div>
+            <div style={{ fontSize: 13 }}>아직 등록된 직원이 없습니다</div>
+            <div style={{ fontSize: 11, marginTop: 4 }}>이름·시급만 넣으면 바로 시작돼요</div>
           </Card>
         ) : (
           workers.map(w => (
@@ -3051,20 +3353,32 @@ function WorkersTab({ user, workplace, workers, onRefresh }) {
                   display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18
                 }}>👤</div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 800, fontSize: 14 }}>{w.name}</span>
                     <Badge color={w.status === 'approved' ? 'green' : 'gold'}>
-                      {w.status === 'approved' ? '✓ 승인' : '대기중'}
+                      {w.status === 'approved' ? '✓ 재직' : '승인 대기'}
                     </Badge>
+                    {Number(w.hourly) < MIN_WAGE && <Badge color="red">최저임금 미달</Badge>}
                   </div>
                   <div style={{ fontSize: 11, color: C.t3 }}>
-                    시급 {w.hourly?.toLocaleString()}원 · 소정 {w.sojeong_h}h
+                    시급 {Number(w.hourly || 0).toLocaleString()}원 · 소정 {w.sojeong_h}h
                   </div>
                 </div>
+                {w.status !== 'approved' && (
+                  <Btn size="sm" onClick={() => approve(w)}>✓ 승인</Btn>
+                )}
+                <button onClick={() => removeWorker(w)} style={{
+                  background: 'transparent', border: `1px solid ${C.border}`, color: C.t3,
+                  fontSize: 11, padding: '5px 8px', borderRadius: 7, cursor: 'pointer'
+                }}>🗑</button>
               </div>
             </Card>
           ))
         )}
+
+        <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.7, padding: '8px 4px' }}>
+          ※ 직원 정보는 이 기기에만 저장됩니다. 시급·소정근로시간은 급여 탭에서 언제든 수정할 수 있어요.
+        </div>
       </div>
     </div>
   );
@@ -3075,50 +3389,96 @@ function WorkersTab({ user, workplace, workers, onRefresh }) {
 ============================================================ */
 function AttendanceTab({ user, workplace, workers, attendance, onRefresh }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
-  const [loading, setLoading] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [aWid, setAWid] = useState('');
+  const [aIn, setAIn] = useState('09:00');
+  const [aOut, setAOut] = useState('18:00');
+  const [aBreak, setABreak] = useState('1');
+  const [aPaid, setAPaid] = useState(false);
 
   const dayRecs = attendance.filter(a => a.date === selectedDate);
-
-  const getWorkerName = (wid) => workers.find(w => w.id === wid)?.name || '알 수 없음';
+  const getWorkerName = (wid) => workers.find(w => String(w.id) === String(wid))?.name || '알 수 없음';
 
   const approve = async (id) => {
     await sb.from('attendance').update({ status: 'approved' }).eq('id', id);
     onRefresh();
   };
-  const reject = async (id) => {
-    if (!confirm('삭제할까요?')) return;
+  const removeRec = async (id) => {
+    if (!confirm('이 기록을 삭제할까요?')) return;
     await sb.from('attendance').delete().eq('id', id);
     onRefresh();
   };
 
-  const addDirect = async () => {
-    if (workers.length === 0) { alert('연결된 근로자가 없습니다'); return; }
-    const w = workers[0];
+  const addRecord = async () => {
+    const wid = aWid || (workers[0] && workers[0].id);
+    if (!wid) { alert('먼저 근로자 탭에서 직원을 등록해주세요'); return; }
+    if (!aIn) { alert('출근 시각을 입력해주세요'); return; }
     await sb.from('attendance').insert({
       workplace_id: workplace.id,
-      worker_id: w.id,
+      worker_id: wid,
       date: selectedDate,
-      in_time: '09:00',
-      out_time: '18:00',
-      break_h: 1,
-      break_paid: false,
+      in_time: aIn,
+      out_time: aOut || null,
+      break_h: Number(aBreak) || 0,
+      break_paid: aPaid,
       status: 'approved',
       source: 'employer'
     });
+    setShowAdd(false);
     onRefresh();
   };
 
   return (
     <div>
-      <Header title="출퇴근 관리" subtitle="근로자 입력 → 사업주 확인" />
+      <Header title="출퇴근 관리" subtitle="근로자 입력 승인 또는 직접 입력" />
       <div style={{ padding: 16 }}>
-        <Card style={{ marginBottom: 14, padding: 10 }}>
+        <Card style={{ marginBottom: 12, padding: 10 }}>
           <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)}
             style={{
               width: '100%', padding: '8px', fontSize: 13, fontWeight: 700,
               border: `1.5px solid ${C.border}`, borderRadius: 7, textAlign: 'center', outline: 'none'
             }} />
         </Card>
+
+        <Btn variant={showAdd ? 'secondary' : 'primary'} size="md"
+             style={{ width: '100%', marginBottom: 12 }}
+             onClick={() => setShowAdd(!showAdd)}>
+          {showAdd ? '▲ 입력 닫기' : `📝 ${selectedDate} 기록 직접 입력`}
+        </Btn>
+
+        {showAdd && (
+          <Card style={{ marginBottom: 14 }}>
+            <FLD label="직원">
+              <select style={SEL} value={aWid} onChange={e => setAWid(e.target.value)}>
+                {workers.length === 0 && <option value="">직원을 먼저 등록하세요</option>}
+                {workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </FLD>
+            <div style={R2}>
+              <FLD label="출근">
+                <input type="time" style={INP} value={aIn} onChange={e => setAIn(e.target.value)} />
+              </FLD>
+              <FLD label="퇴근">
+                <input type="time" style={INP} value={aOut} onChange={e => setAOut(e.target.value)} />
+              </FLD>
+            </div>
+            <div style={R2}>
+              <FLD label="휴게 (h)">
+                <input type="tel" style={INP} value={aBreak} onChange={e => setABreak(e.target.value)} placeholder="1" />
+              </FLD>
+              <FLD label="휴게 임금">
+                <select style={SEL} value={aPaid ? '1' : '0'} onChange={e => setAPaid(e.target.value === '1')}>
+                  <option value="0">무급 (근무시간 제외)</option>
+                  <option value="1">유급 (임금 포함)</option>
+                </select>
+              </FLD>
+            </div>
+            <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.6, marginBottom: 10 }}>
+              ※ 근로 4시간당 휴게 30분 이상을 근로시간 도중에 주어야 합니다 (근기법 §54)
+            </div>
+            <Btn style={{ width: '100%' }} onClick={addRecord}>✓ 기록 저장 (확인 완료 상태)</Btn>
+          </Card>
+        )}
 
         {dayRecs.length === 0 ? (
           <Card style={{ textAlign: 'center', padding: 28, color: C.t3, marginBottom: 14 }}>
@@ -3151,21 +3511,32 @@ function AttendanceTab({ user, workplace, workers, attendance, onRefresh }) {
                     }}>{rec.break_paid ? '유급' : '무급'}</span>
                   </span>
                 </div>
-                {isPending && (
+                {isPending ? (
                   <div style={{ display: 'flex', gap: 6 }}>
                     <Btn size="sm" onClick={() => approve(rec.id)} style={{ flex: 1 }}>✓ 승인</Btn>
-                    <Btn size="sm" variant="danger" onClick={() => reject(rec.id)}>삭제</Btn>
+                    <Btn size="sm" variant="danger" onClick={() => removeRec(rec.id)}>삭제</Btn>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: 'right' }}>
+                    <button onClick={() => removeRec(rec.id)} style={{
+                      background: 'transparent', border: 'none', color: C.t3,
+                      fontSize: 10, cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit'
+                    }}>기록 삭제</button>
                   </div>
                 )}
               </Card>
             );
           })
         )}
+
+        <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.7, padding: '8px 4px' }}>
+          ※ 출퇴근 기록은 임금 산정과 분쟁 예방의 기초 자료입니다. 승인된 기록만 급여 탭 자동 계산에 반영되며,
+          모든 기록은 이 기기에만 저장됩니다.
+        </div>
       </div>
     </div>
   );
 }
-
 
 
 /* ============================================================
@@ -3330,10 +3701,11 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
 
         {workers.length === 0 && (
           <Card style={{ textAlign: 'center', padding: 32, color: C.t3 }}>
-            연결된 근로자가 없습니다<br/>
-            <span style={{ fontSize: 11 }}>근로자 탭에서 초대코드를 공유하세요</span>
+            등록된 직원이 없습니다<br/>
+            <span style={{ fontSize: 11 }}>근로자 탭에서 직원을 먼저 등록하세요</span>
           </Card>
         )}
+        <LegalNote />
       </div>
     </div>
   );
@@ -3597,6 +3969,8 @@ function WorkerConnect({ user, onConnect }) {
         <div style={{ fontWeight: 800, fontSize: 16, color: C.t1 }}>사업장 연결</div>
         <div style={{ fontSize: 11, color: C.t3, marginTop: 4, lineHeight: 1.6 }}>
           사장님이 알려준 6자리 초대코드를 입력하세요
+          {LOCAL_MODE && <><br/><span style={{ color: C.blue, fontWeight: 700 }}>
+            ※ 무가입 모드: 이 기기의 사업주 모드에서 만든 코드만 연결됩니다</span></>}
         </div>
       </div>
       <Card>
@@ -3699,7 +4073,7 @@ function WorkerHome({ user, workplace, workerInfo, records, setTab }) {
         <button onClick={logout} style={{
           background: 'transparent', border: `1px solid ${C.border}`,
           color: C.t3, fontSize: 10, padding: '4px 8px', borderRadius: 6, cursor: 'pointer'
-        }}>로그아웃</button>
+        }}>{LOCAL_MODE ? '⇄ 모드 변경' : '로그아웃'}</button>
       </div>
 
       <div style={{ padding: 16 }}>
@@ -3870,7 +4244,7 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
               📍 위치 포함 {useGPS ? 'ON' : 'OFF'}
             </div>
             <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
-              {useGPS ? 'GPS 좌표를 함께 기록합니다 (증거력 ↑)' : '시각만 기록합니다'}
+              {useGPS ? 'GPS 좌표 기록 (증거력 ↑) · 위치는 이 기기에만 저장' : '시각만 기록합니다'}
             </div>
           </div>
           <div style={{
@@ -4274,7 +4648,7 @@ function WorkerHelp({ user }) {
     { q: '📍 GPS 기록이 증거가 되나요?', a: '네. 출퇴근 시각 + GPS 좌표는 노동청 진정 시 핵심 증거입니다. 사장님이 나중에 부인해도 위치로 입증 가능합니다.' },
     { q: '💵 주휴수당이 뭔가요?', a: '주 15시간 이상 일하고 개근하면 하루치 임금(최대 8h)을 추가로 받는 권리입니다. 아르바이트·단시간 근로자도 적용됩니다.' },
     { q: '📄 근로계약서 안 받았어요', a: '미교부는 사업주에게 500만원 이하 벌금(근기법 §17)입니다. 계약서 요구는 근로자의 정당한 권리입니다.' },
-    { q: '❓ 사장님이 알면 어떡하죠?', a: '이 앱의 기록은 본인 계정에만 저장됩니다. 신고하지 않는 한 사장님께 알려지지 않습니다.' },
+    { q: '❓ 사장님이 알면 어떡하죠?', a: '기록은 이 기기에만 저장되며 서버로 전송되지 않습니다. 본인이 직접 제출하지 않는 한 누구에게도 공개되지 않습니다.' },
   ];
   const [open, setOpen] = useState({});
 
@@ -4308,7 +4682,7 @@ function WorkerHelp({ user }) {
 
         <Card style={{ marginTop: 14 }}>
           <Btn variant="secondary" size="lg" style={{ width: '100%' }} onClick={logout}>
-            🚪 로그아웃
+            {LOCAL_MODE ? '⇄ 시작 화면으로 (모드 변경)' : '🚪 로그아웃'}
           </Btn>
         </Card>
       </div>
@@ -4590,9 +4964,37 @@ function GuestApp({ onExit }) {
 }
 
 /* ============================================================
-   메인 앱
+   메인 앱 — LOCAL_MODE에 따라 무가입(Local) / 회원가입(Cloud) 분기
 ============================================================ */
 function App() {
+  return LOCAL_MODE ? <LocalApp /> : <CloudApp />;
+}
+
+/* 무가입 로컬 모드: 역할만 고르면 즉시 전체 기능 */
+function LocalApp() {
+  const [role, setRole] = useState(() => {
+    try { return localStorage.getItem('ng_role'); } catch(_) { return null; }
+  });
+  const user = useMemo(() => {
+    if (!role) return null;
+    let nm = ''; try { nm = localStorage.getItem('ng_name_' + role) || ''; } catch(_) {}
+    return { id: role === 'worker' ? 'local-worker' : 'local-owner', email: '',
+             user_metadata: { name: nm, role } };
+  }, [role]);
+
+  if (!role) return <StartScreen onPick={(r, nm) => {
+    try {
+      localStorage.setItem('ng_role', r);
+      if (nm && nm.trim()) localStorage.setItem('ng_name_' + r, nm.trim());
+    } catch(_) {}
+    setRole(r);
+  }} />;
+  if (role === 'worker') return <WorkerApp user={user} />;
+  return <EmployerApp user={user} />;
+}
+
+/* 회원가입(Supabase) 모드 — LOCAL_MODE=false 시 사용 (코드 보존) */
+function CloudApp() {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState(null);
   const [guest, setGuest] = useState(false);

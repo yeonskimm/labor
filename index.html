@@ -289,7 +289,9 @@ function calcSeg(inAbs,outAbs,hourly,rate,is5plus){
   const min=outAbs-inAbs;
   const nMin=is5plus?nightMin(inAbs,outAbs):0;
   const dMin=min-nMin;
-  return {min, nightMin:nMin, pay:(dMin/60)*hourly*rate+(nMin/60)*hourly*(rate+0.5)};
+  // 상시 5인 미만: 근기법 §56 가산 적용 제외 → 연장이어도 ×1.0 (야간가산도 0)
+  const eff=is5plus?rate:1.0;
+  return {min, nightMin:nMin, pay:(dMin/60)*hourly*eff+(nMin/60)*hourly*(eff+0.5)};
 }
 
 function calcDay(inT,sojT,actT,hourly,is5plus){
@@ -327,6 +329,29 @@ function calcWeek(schedule,hourly,is5plus,sojeongH=8){
   return {days,sojMin,otMin,totalPay,nightTotal,hasJuhyu,juhyuH,juhyuPay,
     needMore:Math.max(0,15*60-sojMin),
     weekTotal:totalPay+juhyuPay, monthEst:(totalPay+juhyuPay)*4.345};
+}
+
+/* ══════════════════════════════
+   상시근로자 수 자동 산정 (근기법 시행령 §7의2)
+   - 산정기간(해당 월) 연인원 ÷ 가동일수
+   - §7의2②③ 보정: 가동일 중 5인 미만인 날이 1/2 미만이면 5인 이상,
+     1/2 이상이면 5인 미만으로 본다 (산술평균과 달라질 수 있음)
+   - 앱에 기록된 출퇴근만 집계하므로 '참고치'로만 사용
+══════════════════════════════ */
+function estimateSangsi(attendance, month){
+  const byDay={};
+  (attendance||[]).forEach(a=>{
+    if(!a.date||!a.date.startsWith(month)||!a.in_time) return;
+    (byDay[a.date]=byDay[a.date]||new Set()).add(a.worker_id??a.id);
+  });
+  const days=Object.keys(byDay);
+  const opDays=days.length;
+  if(!opDays) return null;
+  let sum=0, under5=0;
+  days.forEach(d=>{ const n=byDay[d].size; sum+=n; if(n<5) under5++; });
+  const avg=sum/opDays;
+  return {opDays, sum, avg, under5,
+    est5plus: under5/opDays < 0.5};   // ②③항 통합: 가동일 과반이 5인 이상이면 5인 이상
 }
 
 function isoWeekKey(dateStr){
@@ -2889,6 +2914,10 @@ function LawScreen({onBack,lang,setLang,initN}){
           {n<5
             ?<><b style={{color:"#a02828"}}>5인 미만 사업장</b> — 연차·가산수당·주52시간·부당해고구제 등 제외.<br/>최저임금·근로계약서·주휴수당·퇴직금은 동일 적용.</>
             :<><b style={{color:"#1a6040"}}>5인 이상 사업장</b> — 근로기준법 대부분 + <b style={{color:"#1a6040"}}>중대재해처벌법</b> 적용.</>}
+          <div style={{fontSize:11,color:C.txt3,marginTop:6,lineHeight:1.6}}>
+            ※ 근로계약서를 쓴 <b>등록 인원수</b>가 아니라 <b>연인원÷가동일수</b>로 산정한 상시
+            인원입니다 (시행령 §7의2) — 교대 근무라면 아래 계산기로 확인하세요
+          </div>
         </div>
 
         {/* ── 상시근로자 산정 안내 + 계산기 ── */}
@@ -3645,7 +3674,7 @@ function EmployerHome({ user, workplace, workers, attendance, setTab, openSub })
           <div style={{ position: 'absolute', left: 11, top: 12, bottom: 12, width: 2,
             background: 'linear-gradient(180deg,#e3c86e,#b8922a)', borderRadius: 1 }} />
           {[
-            { n: 1, ic: '⚖️', t: '의무사항 자가진단', s: `직원 ${workers.length}명 기준 적용 법령 확인`,
+            { n: 1, ic: '⚖️', t: '의무사항 자가진단', s: `등록 ${workers.length}명 — 상시 인원은 따로 산정 (시행령 §7의2)`,
               law: '62개 항목 자동 판정', go: () => openSub('diagnosis') },
             { n: 2, ic: '📄', t: '근로계약서 작성·교부', s: '서면으로 명시하고 1부 교부',
               law: '근기법 §17', go: () => openSub('contract') },
@@ -3975,7 +4004,22 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
   const [editId, setEditId] = useState(null);
   const [eHourly, setEHourly] = useState('');
   const [eSoj, setESoj] = useState('');
-  const is5plus = workers.length >= 5;
+  /* 상시 5인 판정: 등록 인원수가 아니라 사업장 설정(시행령 §7의2 산정 결과) 기준.
+     매일 2명씩 교대해도 등록이 10명일 수 있으므로 workers.length로 판정하면 안 됨 */
+  const fiveSet = workplace && (workplace.is5plus === true || workplace.is5plus === false);
+  const is5plus = workplace?.is5plus === true;
+  const [editFive, setEditFive] = useState(false);
+  const [fiveSaving, setFiveSaving] = useState(false);
+  const est = useMemo(() => estimateSangsi(attendance, month), [attendance, month]);
+
+  const saveFive = async (v) => {
+    if (fiveSaving) return;
+    setFiveSaving(true);
+    await sb.from('workplaces').update({ is5plus: v }).eq('id', workplace.id);
+    setFiveSaving(false);
+    setEditFive(false);
+    onRefresh && onRefresh();
+  };
 
   const calcDetail = (w) => {
     const hourly = Number(w.hourly) || MIN_WAGE;
@@ -3994,7 +4038,7 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
       byWeek[wk] = (byWeek[wk]||0) + res.sojeongMin;
     });
     const base = Math.round(sojMin/60*hourly);
-    const ot = Math.round(otMin/60*hourly*1.5);
+    const ot = Math.round(otMin/60*hourly*(is5plus?1.5:1.0));   // 5인 미만: §56 가산 제외 → ×1.0
     const night = is5plus ? Math.round(nightM/60*hourly*0.5) : 0;
     let holiday = 0, jWeeks = 0;
     Object.values(byWeek).forEach(m => { if (m >= 15*60) { jWeeks++; holiday += Math.min((m/60)/40*8, 8)*hourly; } });
@@ -4019,7 +4063,7 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
       basePay: String(p.base),
       baseCalc: `소정 ${fmtH(p.sojMin)}h × ${p.hourly.toLocaleString()}원`,
       otPay: p.ot ? String(p.ot) : '', otHours: p.otMin ? fmtH(p.otMin) : '',
-      otCalc: p.ot ? `연장 ${fmtH(p.otMin)}h × ${p.hourly.toLocaleString()}원 × 1.5` : '',
+      otCalc: p.ot ? `연장 ${fmtH(p.otMin)}h × ${p.hourly.toLocaleString()}원 × ${is5plus?'1.5':'1.0 (5인 미만 가산 제외)'}` : '',
       nightPay: p.night ? String(p.night) : '', nightHours: p.nightM ? fmtH(p.nightM) : '',
       nightCalc: p.night ? `야간 ${fmtH(p.nightM)}h × ${p.hourly.toLocaleString()}원 × 0.5` : '',
       holidayPay: p.holiday ? String(p.holiday) : '',
@@ -4038,11 +4082,87 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
               border: `1.5px solid ${C.border}`, borderRadius: 7, textAlign: 'center', outline: 'none' }} />
         </Card>
 
-        {!is5plus && workers.length > 0 && (
+        {/* ── 상시 5인 여부 (시행령 §7의2 기준 — 등록 인원수와 다름) ── */}
+        <Card style={{ marginBottom: 12,
+          background: fiveSet ? '#fff' : '#fffbeb',
+          borderColor: fiveSet ? C.border : '#fde68a' }}>
+          {fiveSet && !editFive ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 900, color: is5plus ? C.green : C.t2 }}>
+                {is5plus ? '🏬 상시 5인 이상 · 연장 1.5배 / 야간 +0.5배 적용' : '🏪 상시 5인 미만 · 가산 제외 (연장도 ×1.0)'}
+              </span>
+              <button onClick={() => setEditFive(true)} style={{ marginLeft: 'auto', flexShrink: 0,
+                padding: '5px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                background: '#fff', border: `1px solid ${C.border}`, color: C.t3,
+                fontSize: 10.5, fontWeight: 700 }}>변경</button>
+            </div>
+          ) : (
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 900, color: fiveSet ? C.t1 : '#92400e', marginBottom: 4 }}>
+                {fiveSet ? '🏬 상시 5인 여부 변경' : '⚠️ 상시 5인 여부를 설정해주세요'}
+              </div>
+              <div style={{ fontSize: 10.5, color: C.t2, lineHeight: 1.7, marginBottom: 10 }}>
+                <b>등록 직원 수({workers.length}명)와 다른 개념</b>이에요. 상시근로자 수 =
+                해당 기간 <b>매일 출근한 연인원 ÷ 가동일수</b>(근기법 시행령 §7의2).
+                예: 직원 10명을 등록해도 매일 2명씩 일하면 상시 2명 → 5인 미만.
+                이 값에 따라 연장·야간 가산(§56)·연차(§60) 적용이 갈려요.
+              </div>
+              {est && (
+                <div style={{ background: '#f0f6ff', border: '1px solid #bfdbfe', borderRadius: 9,
+                  padding: '9px 11px', marginBottom: 10 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 800, color: C.blue }}>
+                    📐 {month} 출퇴근 기록 기반 추정: 연인원 {est.sum}명 ÷ 가동 {est.opDays}일
+                    = <b>{est.avg.toFixed(1)}명</b> → {est.est5plus ? '5인 이상' : '5인 미만'} 추정
+                  </div>
+                  <div style={{ fontSize: 9, color: C.t3, marginTop: 3, lineHeight: 1.6 }}>
+                    가동일 중 5인 미만인 날 {est.under5}/{est.opDays}일 ({est.under5/est.opDays >= 0.5 ? '½ 이상 → 5인 미만 간주' : '½ 미만 → 5인 이상 간주'}, §7의2②③ 보정 반영)<br/>
+                    ※ 앱에 기록된 출퇴근만 집계한 참고치 — 앱을 안 쓰는 직원이 있으면 실제보다 적게 나와요
+                  </div>
+                </div>
+              )}
+              {!est && (
+                <div style={{ fontSize: 10, color: C.t3, marginBottom: 10 }}>
+                  ※ {month} 출퇴근 기록이 없어 자동 추정이 어려워요 — 자가진단 탭의 상시근로자 계산기를 활용하세요
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <button disabled={fiveSaving} onClick={() => saveFive(false)} style={{
+                  padding: '12px 6px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit',
+                  background: workplace?.is5plus === false ? blueGrad : '#fff',
+                  color: workplace?.is5plus === false ? '#fff' : C.t2,
+                  border: workplace?.is5plus === false ? 'none' : `1.5px solid ${C.border}`,
+                  fontSize: 12.5, fontWeight: 800 }}>🏪 상시 5인 미만</button>
+                <button disabled={fiveSaving} onClick={() => saveFive(true)} style={{
+                  padding: '12px 6px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit',
+                  background: workplace?.is5plus === true ? blueGrad : '#fff',
+                  color: workplace?.is5plus === true ? '#fff' : C.t2,
+                  border: workplace?.is5plus === true ? 'none' : `1.5px solid ${C.border}`,
+                  fontSize: 12.5, fontWeight: 800 }}>🏬 상시 5인 이상</button>
+              </div>
+              {fiveSet && (
+                <button onClick={() => setEditFive(false)} style={{ width: '100%', marginTop: 8,
+                  padding: '8px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                  background: 'transparent', border: 'none', color: C.t3, fontSize: 11, fontWeight: 700 }}>
+                  닫기</button>
+              )}
+            </div>
+          )}
+        </Card>
+
+        {!fiveSet && (
+          <Card style={{ marginBottom: 12, padding: 10, background: '#fff5f5', borderColor: '#fed7d7' }}>
+            <div style={{ fontSize: 10.5, color: C.red, fontWeight: 700, lineHeight: 1.6 }}>
+              ⚠️ 미설정 상태라 임시로 <b>5인 미만(가산 제외)</b> 기준으로 계산 중 —
+              실제 5인 이상이면 연장·야간 가산이 누락돼 임금체불이 됩니다. 위에서 꼭 설정하세요.
+            </div>
+          </Card>
+        )}
+
+        {fiveSet && !is5plus && workers.length > 0 && (
           <Card style={{ marginBottom: 12, padding: 10, background: '#f9fafb' }}>
             <div style={{ fontSize: 10.5, color: C.t3, lineHeight: 1.6 }}>
-              ℹ️ 상시 5인 미만 사업장 — 연장 1.5배·야간 0.5배 가산은 미적용 기준으로 계산했습니다.
-              (5인 미만은 가산 의무 없음 · 주휴수당은 동일 적용)
+              ℹ️ 상시 5인 미만 사업장 — 연장·야간 가산(§56)은 적용 제외라 연장시간도 ×1.0으로 계산했습니다.
+              (실근로 임금·주휴수당·최저임금·퇴직금은 동일 적용)
             </div>
           </Card>
         )}
@@ -4083,7 +4203,7 @@ function PayrollTab({ workplace, workers, attendance, onPayslip, onRefresh }) {
 
               {opened && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.border}` }}>
-                  {[['기본급 (소정)', p.base], ['연장수당 (×1.5)', p.ot],
+                  {[['기본급 (소정)', p.base], [`연장수당 (×${is5plus?'1.5':'1.0'})`, p.ot],
                     ['야간가산 (×0.5)', p.night], [`주휴수당 (${p.jWeeks}주)`, p.holiday]].map(([k, v]) => (
                     <div key={k} style={{ display: 'flex', justifyContent: 'space-between',
                       fontSize: 12, marginBottom: 5, color: v ? C.t1 : C.t3 }}>
@@ -4230,7 +4350,9 @@ function EmployerApp({ user }) {
   // 전체화면 서식 스택
   if (sub === 'diagnosis')
     return <LawScreen onBack={() => setSub(null)} lang="ko" setLang={() => {}}
-                      initN={workers.length || 1} />;
+                      initN={workplace.is5plus === true ? Math.max(5, workers.length || 5)
+                           : workplace.is5plus === false ? Math.min(4, Math.max(1, workers.length || 1))
+                           : (workers.length || 1)} />;
   if (sub === 'contract')
     return <ContractScreen onBack={() => setSub(null)} workers={workers}
                            workplace={workplace} user={user} />;
@@ -4523,8 +4645,9 @@ function WorkerSetup({ user, onDone }) {
                   · <b>5인 미만</b>: 가산수당·연차는 적용 제외예요. 다만 일한 시간만큼의
                   임금·주휴수당·최저임금은 똑같이 보장돼요<br/><br/>
                   <b style={{ color: C.blue }}>잘 모르겠다면?</b> 출근하는 날 매장에 있는
-                  직원 수를 떠올려보세요. 들쑥날쑥하면 평균으로 5명이 넘는지를 기준으로 하고,
-                  나중에 더보기 탭에서 언제든 바꿀 수 있어요.
+                  직원 수를 떠올려보세요. 정확한 기준은 <b>한 달 연인원 ÷ 가동일수</b>예요
+                  (시행령 §7의2) — 등록·계약한 인원수가 아니라 <b>매일 실제로 일하는 평균
+                  인원</b>이 5명 이상인지로 보고, 나중에 더보기 탭에서 언제든 바꿀 수 있어요.
                 </div>
               </Card>
             )}

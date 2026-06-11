@@ -51,6 +51,8 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script type="text/babel" data-type="module">
 
@@ -376,13 +378,116 @@ function calcAttendDetail(inT,outT,sojeongH,hourly,is5plus,breakH=0,breakPaid=fa
     total: basePay + otExtra + nightExtra};
 }
 
+/* ══════════════════════════════
+   ① 임금유형(시급·일급·주급·월급) → 통상시급 환산
+   계산 엔진은 통상시급 하나만 받으므로 입력 레이어에서만 환산 (대화록 §5)
+══════════════════════════════ */
+const WAGE_TYPES=[
+  {id:'hourly', label:'시급', unit:'원/시간'},
+  {id:'daily',  label:'일급', unit:'원/일'},
+  {id:'weekly', label:'주급', unit:'원/주'},
+  {id:'monthly',label:'월급', unit:'원/월'},
+];
+const juhyuHoursOf=weekSojH=>weekSojH>=15?Math.min(weekSojH/40*8,8):0;
+function toHourlyWage({wageType,amount,sojeongH,daysPerWeek,weeklyIncludesJuhyu}){
+  const amt=Number(amount)||0, dH=Number(sojeongH)||0, dpw=Number(daysPerWeek)||0;
+  if(!amt) return null;
+  if(!wageType||wageType==='hourly') return {hourly:amt,formula:'시급 그대로 적용'};
+  if(wageType==='daily'){
+    if(!dH) return null;
+    return {hourly:amt/dH,formula:`일급 ${won(amt)}원 ÷ 1일 소정 ${dH}h`};
+  }
+  if(!dH||!dpw) return null;
+  const weekH=dH*dpw, jH=juhyuHoursOf(weekH);
+  if(wageType==='weekly'){
+    const div=weeklyIncludesJuhyu?weekH+jH:weekH;
+    if(!div) return null;
+    return {hourly:amt/div,
+      formula:weeklyIncludesJuhyu
+        ?`주급 ${won(amt)}원 ÷ (주 소정 ${weekH}h + 주휴 ${jH.toFixed(1)}h)`
+        :`주급 ${won(amt)}원 ÷ 주 소정 ${weekH}h (주휴 미포함 주급)`};
+  }
+  const baseH=(weekH+jH)*4.345;
+  if(!baseH) return null;
+  return {hourly:amt/baseH,
+    formula:`월급 ${won(amt)}원 ÷ [(주 소정 ${weekH}h + 주휴 ${jH.toFixed(1)}h) × 4.345 ≈ ${baseH.toFixed(1)}h]`};
+}
+
+/* ══════════════════════════════
+   ② 출퇴근 판정 — 3레이어 분리 (대화록 §2-②)
+   기록 레이어: 찍은 시각 그대로 영구 보존 (in_time/out_time은 절대 수정하지 않음)
+   판정 레이어: 소정시각(시업~종업) 내 = in_schedule 자동 인정,
+               밖 = 조기/늦은 구간으로 분리해 분류 대기
+   계산 레이어: claimed(업무 지시·승인 있었음)만 포함,
+               excluded(자발적 대기)·null(미분류)은 제외 — 기본값 제외(정확성 우선)
+   저장 플래그: early_type / late_type ∈ 'claimed' | 'excluded' | null
+   (Phase B: 'claimed' 건만 사업주 승인 요청으로 전달)
+══════════════════════════════ */
+function splitSched(r,sched){
+  if(!sched||!sched.start||!sched.end) return null;
+  const inM=toMin(r.in_time), outRaw=toMin(r.out_time);
+  if(inM===null||outRaw===null) return null;
+  const outM = outRaw===inM ? inM : resolveEnd(inM,outRaw);
+  const sS=toMin(sched.start), sE0=toMin(sched.end);
+  if(sS===null||sE0===null||sS===sE0) return null;
+  let s=sS, e=resolveEnd(sS,sE0);
+  // 야간조(자정 넘김) 소정시각: 자정 이후 출근 기록은 전날 시작 교대로 정렬
+  if(e>1440 && inM<sE0){ s-=1440; e-=1440; }
+  const earlyMin=Math.max(0, Math.min(outM,s)-inM);
+  const lateMin =Math.max(0, outM-Math.max(inM,e));
+  return {inM,outM,s,e,earlyMin,lateMin};
+}
+/* 분류 플래그 적용 → 계산용 유효 출퇴근 시각 + 미분류/제외 분량 */
+function applySched(r,sched,assumeClaim){
+  const seg=splitSched(r,sched);
+  if(!seg||(seg.earlyMin===0&&seg.lateMin===0))
+    return {inT:r.in_time,outT:r.out_time,pendMin:0,exclMin:0,seg,pendEarly:false,pendLate:false};
+  let effIn=seg.inM, effOut=seg.outM, pendMin=0, exclMin=0, pendEarly=false, pendLate=false;
+  const eT=assumeClaim&&!r.early_type?'claimed':r.early_type;
+  const lT=assumeClaim&&!r.late_type ?'claimed':r.late_type;
+  if(seg.earlyMin>0 && eT!=='claimed'){
+    effIn=Math.min(seg.outM,Math.max(seg.inM,seg.s));
+    if(eT==='excluded') exclMin+=seg.earlyMin;
+    else { pendMin+=seg.earlyMin; pendEarly=true; }
+  }
+  if(seg.lateMin>0 && lT!=='claimed'){
+    effOut=Math.max(effIn,Math.min(seg.outM,seg.e));
+    if(lT==='excluded') exclMin+=seg.lateMin;
+    else { pendMin+=seg.lateMin; pendLate=true; }
+  }
+  return {inT:minToTime(effIn),outT:effOut<=effIn?minToTime(effIn):minToTime(effOut),
+    pendMin,exclMin,seg,pendEarly,pendLate};
+}
+/* 기록 1건의 미분류 분량 (배지용) */
+function pendingMinOf(r,sched){
+  if(!r.out_time) return 0;
+  const ap=applySched(r,sched,false);
+  return ap.pendMin||0;
+}
+/* 기록 1건의 인정 근무시간 (분류 반영, 휴게 차감) */
+function recognizedHours(r,sched){
+  if(!r.in_time||!r.out_time) return 0;
+  if(!sched) return calcDayHours(r);
+  const ap=applySched(r,sched,false);
+  return calcDayHours({...r,in_time:ap.inT,out_time:ap.outT});
+}
+
 /* 월 집계 + 주휴수당 (ISO 주 단위 · 주 소정 15h 이상 시
-   min(주 소정/40 ×8, 8)시간 × 시급 — 기록 주의 개근을 전제) */
-function calcWorkerMonth(recs, hourly, sojeongH, is5plus){
+   min(주 소정/40 ×8, 8)시간 × 시급 — 기록 주의 개근을 전제)
+   sched(소정 시업·종업) 전달 시 ②판정 레이어를 거쳐 인정 시간만 합산 */
+function calcWorkerMonth(recs, hourly, sojeongH, is5plus, sched, _assumeClaim){
   let workMin=0,sojMin=0,otMin=0,nMin=0,basePay=0,otExtra=0,nightExtra=0,days=0;
+  let pendMin=0, exclMin=0, pendDays=0;
   const byWeek={};
   (recs||[]).forEach(r=>{
-    const d=calcAttendDetail(r.in_time,r.out_time,sojeongH,hourly,is5plus,
+    let inT=r.in_time, outT=r.out_time;
+    if(sched){
+      const ap=applySched(r,sched,_assumeClaim);
+      inT=ap.inT; outT=ap.outT;
+      pendMin+=ap.pendMin; exclMin+=ap.exclMin;
+      if(ap.pendMin>0) pendDays++;
+    }
+    const d=calcAttendDetail(inT,outT,sojeongH,hourly,is5plus,
       Number(r.break_h)||0, !!r.break_paid);
     if(!d||d.zero) return;
     days++; workMin+=d.workMin; sojMin+=d.sojMin; otMin+=d.otMin; nMin+=d.nMin;
@@ -399,9 +504,16 @@ function calcWorkerMonth(recs, hourly, sojeongH, is5plus){
       shortMin:ok?0:15*60-w.sojMin};
   });
   const juhyuPay=juhyuH*hourly;
+  const total=Math.round(basePay+otExtra+nightExtra+juhyuPay);
+  // "포함 시 +○○원" 참고선: 미분류를 전부 인정했다고 가정한 차액
+  let pendDelta=0;
+  if(!_assumeClaim && sched && pendMin>0){
+    const alt=calcWorkerMonth(recs,hourly,sojeongH,is5plus,sched,true);
+    pendDelta=Math.max(0,alt.total-total);
+  }
   return {days,workMin,sojMin,otMin,nMin,basePay,otExtra,nightExtra,
-    juhyuH,juhyuPay,weeks,
-    total:Math.round(basePay+otExtra+nightExtra+juhyuPay)};
+    juhyuH,juhyuPay,weeks,total,
+    pendMin,exclMin,pendDays,pendDelta};
 }
 
 /* ── 근로자 설정 (이 기기에 저장) ── */
@@ -413,7 +525,15 @@ function loadWorkerSettings(){
       done:true, is5plus:!!s.is5plus,
       hourly:Number(s.hourly)||MIN_WAGE,
       sojeongH:Number(s.sojeongH)||8,
-      wpName:s.wpName||''
+      wpName:s.wpName||'',
+      // ① 임금유형 입력 레이어
+      wageType:s.wageType||'hourly',
+      wageAmount:Number(s.wageAmount)||Number(s.hourly)||MIN_WAGE,
+      daysPerWeek:Number(s.daysPerWeek)||5,
+      weeklyIncludesJuhyu:s.weeklyIncludesJuhyu!==false,
+      // ② 소정 시업·종업 시각 (선택 — 출퇴근 판정 기준)
+      startTime:s.startTime||'',
+      endTime:s.endTime||''
     };
   }catch(_){}
   return null;
@@ -421,12 +541,15 @@ function loadWorkerSettings(){
 function saveWorkerSettings(s){
   try{ localStorage.setItem(WS_KEY, JSON.stringify(s)); }catch(_){}
 }
-/* 연결 모드면 사업주가 등록한 시급·소정이 우선, 5인 여부는 근로자 설정 */
+/* 연결 모드면 사업주가 등록한 시급·소정이 우선, 5인 여부는 근로자 설정
+   sched(소정 시업·종업)는 근로자 본인 판정 기준이므로 항상 근로자 설정을 따름 */
 function effectiveCond(workerInfo, settings){
   return {
     hourly: Number(workerInfo?.hourly)||Number(settings?.hourly)||MIN_WAGE,
     sojeongH: Number(workerInfo?.sojeong_h)||Number(settings?.sojeongH)||8,
     is5plus: settings ? !!settings.is5plus : true,
+    sched: (settings?.startTime && settings?.endTime)
+      ? {start:settings.startTime, end:settings.endTime} : null,
   };
 }
 
@@ -597,8 +720,56 @@ function BottomNav({ tab, setTab }) {
    공통 UI — demo (서식·진단 화면용)
 ══════════════════════════════ */
 
-function SubHdr({title,back,step,totalStep,lang,setLang,right}){
+/* ══════════════════════════════
+   ④ 뒤로가기 — 히스토리 스택 관리
+   - useBackClose: 전체화면 서브화면이 물리 뒤로가기/iOS 스와이프로 닫히게 함
+     핸들러가 true 반환 → 화면 유지(내부 단계만 이동), false → 닫힘
+   - useTabBack : 비-home 탭에서 뒤로가기 → home 탭 복귀 (앱 종료 방지)
+══════════════════════════════ */
+const BackStack=(()=>{ 
+  const stack=[]; let ignoreNext=false;
+  window.addEventListener('popstate',()=>{
+    if(ignoreNext){ ignoreNext=false; return; }
+    const top=stack[stack.length-1];
+    if(!top) return;
+    let stay=false;
+    try{ stay=!!(top.fn&&top.fn()); }catch(e){ console.error(e); }
+    if(stay){ try{ history.pushState({ng:stack.length},''); }catch(_){} }
+    else stack.pop();
+  });
+  return {
+    push(fn){
+      const entry={fn};
+      stack.push(entry);
+      try{ history.pushState({ng:stack.length},''); }catch(_){}
+      return ()=>{ // 컴포넌트가 UI로 닫힐 때: 자기 엔트리 제거
+        const i=stack.indexOf(entry);
+        if(i<0) return;
+        const wasTop=(i===stack.length-1);
+        stack.splice(i,1);
+        if(wasTop){ ignoreNext=true; try{ history.back(); }catch(_){ ignoreNext=false; } }
+      };
+    }
+  };
+})();
+function useBackClose(active,onBack){
+  const ref=useRef(onBack); ref.current=onBack;
+  useEffect(()=>{
+    if(!active) return;
+    return BackStack.push(()=>ref.current?ref.current():false);
+  },[active]);
+}
+function useTabBack(tab,setTab,home='home'){
+  const setRef=useRef(setTab); setRef.current=setTab;
+  useEffect(()=>{
+    if(tab===home) return;
+    return BackStack.push(()=>{ setRef.current(home); return false; });
+  },[tab,home]);
+}
+
+function SubHdr({title,back,step,totalStep,lang,setLang,right,accent}){
   const ko=lang==='ko';
+  const grad=accent==='blue'?blueGrad:'linear-gradient(135deg,#d4a83c,#b8922a)';
   return(
     <div style={{background:'linear-gradient(180deg,#ffffff 0%,#f4f8fd 100%)',
       borderBottom:'1px solid rgba(184,146,42,0.1)',
@@ -614,11 +785,11 @@ function SubHdr({title,back,step,totalStep,lang,setLang,right}){
             boxShadow:'0 1px 4px rgba(30,50,90,0.08)'}}>← {ko?'뒤로':'Back'}</button>}
         <div style={{flex:1,fontWeight:800,fontSize:14,overflow:'hidden',
           textOverflow:'ellipsis',whiteSpace:'nowrap',
-          background:'linear-gradient(135deg,#d4a83c,#b8922a)',
+          background:grad,
           WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>{title}</div>
-        {step&&totalStep&&<div style={{background:'linear-gradient(135deg,rgba(184,146,42,0.1),rgba(184,146,42,0.05))',
-          border:'1px solid rgba(184,146,42,0.2)',
-          borderRadius:20,padding:'3px 9px',fontSize:11,color:'#b8922a',fontWeight:800,
+        {step&&totalStep&&<div style={{background:accent==='blue'?'rgba(59,110,196,0.08)':'linear-gradient(135deg,rgba(184,146,42,0.1),rgba(184,146,42,0.05))',
+          border:accent==='blue'?'1px solid rgba(59,110,196,0.25)':'1px solid rgba(184,146,42,0.2)',
+          borderRadius:20,padding:'3px 9px',fontSize:11,color:accent==='blue'?'#3b6ec4':'#b8922a',fontWeight:800,
           flexShrink:0}}>{step}/{totalStep}</div>}
         {right}
 
@@ -666,6 +837,73 @@ const BigBtn=({onClick,children,style={}})=>(
    A4 스케일 래퍼 (모바일 대응)
 ═══════════════════════════════════════ */
 const A4=794;
+
+/* ══════════════════════════════
+   ⑤ PDF 저장 (html2canvas + jsPDF)
+   - 오프스크린에 A4 폭(794px)으로 렌더 후 캡처 → 다중 페이지 분할
+   - iOS Safari: a[download] 불안정 → blob URL 새 탭 → 공유시트(파일에 저장) 유도
+══════════════════════════════ */
+const IS_IOS=/iP(hone|od|ad)/.test(navigator.userAgent)
+  || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+const pdfFileName=(...parts)=>
+  parts.filter(Boolean).join('_').replace(/[\\/:*?"<>|\s]+/g,'_')+'_'+todayStr()+'.pdf';
+function deliverPdfBlob(blob,fileName){
+  const url=URL.createObjectURL(blob);
+  if(IS_IOS){
+    const w=window.open(url,'_blank');
+    if(!w) alert('팝업이 차단됐습니다. 팝업을 허용한 뒤 다시 시도해주세요.\n열린 PDF에서 공유 → "파일에 저장"을 누르면 저장됩니다.');
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+    return;
+  }
+  const a=document.createElement('a');
+  a.href=url; a.download=fileName;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+async function captureToPDF(node,fileName){
+  if(!window.html2canvas||!window.jspdf){ alert('PDF 모듈을 아직 불러오지 못했어요. 잠시 후 다시 시도해주세요.'); return false; }
+  const canvas=await window.html2canvas(node,{scale:2,useCORS:true,backgroundColor:'#ffffff',
+    windowWidth:A4,width:A4});
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+  const pageWmm=210, pageHmm=297;
+  const pxPerMm=canvas.width/pageWmm;
+  const pageHpx=Math.floor(pageHmm*pxPerMm);
+  let y=0, first=true;
+  while(y<canvas.height){
+    const sliceH=Math.min(pageHpx,canvas.height-y);
+    const c=document.createElement('canvas');
+    c.width=canvas.width; c.height=sliceH;
+    c.getContext('2d').drawImage(canvas,0,y,canvas.width,sliceH,0,0,canvas.width,sliceH);
+    if(!first) pdf.addPage();
+    pdf.addImage(c.toDataURL('image/jpeg',0.92),'JPEG',0,0,pageWmm,sliceH/pxPerMm);
+    first=false; y+=sliceH;
+  }
+  deliverPdfBlob(pdf.output('blob'),fileName);
+  return true;
+}
+/* 화면의 미리보기 요소(el)를 그대로 PDF로 — 스케일 변형 없이 오프스크린 복제 캡처 */
+async function saveElementAsPDF(el,fileName){
+  if(!el) return false;
+  const host=document.createElement('div');
+  host.style.cssText=`position:fixed;left:-10000px;top:0;width:${A4}px;background:#fff;z-index:-1`;
+  const clone=el.cloneNode(true);
+  host.appendChild(clone); document.body.appendChild(host);
+  try{ await new Promise(r=>setTimeout(r,60)); return await captureToPDF(host,fileName); }
+  catch(e){ console.error(e); alert('PDF 저장 중 오류가 발생했어요: '+e.message); return false; }
+  finally{ host.remove(); }
+}
+/* HTML 문자열을 오프스크린 렌더 후 PDF로 (증거자료용) */
+async function saveHTMLAsPDF(html,fileName){
+  const host=document.createElement('div');
+  host.style.cssText=`position:fixed;left:-10000px;top:0;width:${A4}px;background:#fff;z-index:-1`;
+  host.innerHTML=html;
+  document.body.appendChild(host);
+  try{ await new Promise(r=>setTimeout(r,60)); return await captureToPDF(host,fileName); }
+  catch(e){ console.error(e); alert('PDF 저장 중 오류가 발생했어요: '+e.message); return false; }
+  finally{ host.remove(); }
+}
+
 function ScaledPreview({children,pRef}){
   const wRef=useRef(null);
   const[scale,setScale]=useState(1);
@@ -1964,9 +2202,15 @@ function PayslipPreview({f,pRef}){
 /* ═══════════════════════════════════════
    퇴직금 계산기 (근퇴법 §8, 근기법 §2)
 ═══════════════════════════════════════ */
-function RetirementScreen({onBack,lang,setLang}){
+function RetirementScreen({onBack,lang,setLang,accent,prefill}){
   const ko=lang==='ko';
   const won=n=>Math.round(n||0).toLocaleString();
+  /* 근로자 모드 재사용: accent='blue' 면 블루 테마 */
+  const acc=accent==='blue';
+  const accGrad=acc?blueGrad:'linear-gradient(160deg,#d4a83c,#b8922a)';
+  const accCol=acc?'#3b6ec4':'#b8922a';
+  const accShadow=acc?'0 3px 14px rgba(59,110,196,0.35)':'0 3px 14px rgba(184,146,42,0.35)';
+  useBackClose(true,()=>{ onBack(); return false; }); // ④ 물리 뒤로가기
   const [tab,setTab]=useState('avg'); // avg|std|db|dc
   // 공통: 근속기간
   const [startDate,setStartDate]=useState('');
@@ -2060,7 +2304,7 @@ function RetirementScreen({onBack,lang,setLang}){
   return(
     <div style={{background:'#f6f9fd',minHeight:'100vh',
       fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:520,margin:'0 auto'}}>
-      <SubHdr title="🏦 퇴직금 계산기" back={onBack}
+      <SubHdr title="🏦 퇴직금 계산기" back={onBack} accent={accent}
         lang={lang} setLang={setLang}/>
 
       <div style={{padding:'14px 16px 80px'}}>
@@ -2071,9 +2315,9 @@ function RetirementScreen({onBack,lang,setLang}){
             <button key={t.id} onClick={()=>setTab(t.id)}
               style={{padding:'9px 4px',borderRadius:11,border:'none',fontFamily:'inherit',
                 cursor:'pointer',textAlign:'center',
-                background:tab===t.id?'linear-gradient(160deg,#d4a83c,#b8922a)':'#ffffff',
-                color:tab===t.id?'#fff8ec':'#6b7a8d',
-                boxShadow:tab===t.id?'0 3px 14px rgba(184,146,42,0.35)':'0 1px 4px rgba(30,50,90,0.06)',
+                background:tab===t.id?accGrad:'#ffffff',
+                color:tab===t.id?(acc?'#fff':'#fff8ec'):'#6b7a8d',
+                boxShadow:tab===t.id?accShadow:'0 1px 4px rgba(30,50,90,0.06)',
                 border:tab===t.id?'none':'1.5px solid #dde8f5'}}>
               <div style={{fontSize:12,fontWeight:800}}>{t.label}</div>
               <div style={{fontSize:9,opacity:.75}}>{t.sub}</div>
@@ -2083,7 +2327,7 @@ function RetirementScreen({onBack,lang,setLang}){
 
         {/* ── 공통: 근속기간 ── */}
         <div style={{background:"#ffffff",border:"1.5px solid #dde8f5",borderRadius:14,padding:'15px',marginBottom:14,boxShadow:"0 2px 10px rgba(30,50,90,0.05)"}}>
-          <div style={{fontSize:12,fontWeight:800,color:"#b8922a",marginBottom:8,letterSpacing:"0.2px"}}>📅 근속기간 (공통)</div>
+          <div style={{fontSize:12,fontWeight:800,color:accCol,marginBottom:8,letterSpacing:"0.2px"}}>📅 근속기간 (공통)</div>
           <div style={{background:'rgba(201,168,76,0.07)',border:'1px solid rgba(201,168,76,0.25)',
             borderRadius:8,padding:'9px 11px',marginBottom:10,fontSize:11,color:C.txt2,lineHeight:1.7}}>
             <b style={{color:C.goldL}}>퇴직일 = 마지막 근무일의 다음 날</b><br/>
@@ -2092,10 +2336,10 @@ function RetirementScreen({onBack,lang,setLang}){
           </div>
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
             <button onClick={()=>setLastDayMode(p=>!p)}
-              style={{background:lastDayMode?"linear-gradient(135deg,#d4a83c,#b8922a)":"#f4f8fd",
-                border:`1.5px solid ${lastDayMode?"#c9a030":"#dde8f5"}`,
-                color:lastDayMode?"#fff8ec":"#6b7a8d",
-                boxShadow:lastDayMode?"0 2px 8px rgba(184,146,42,0.3)":"none",
+              style={{background:lastDayMode?accGrad:"#f4f8fd",
+                border:`1.5px solid ${lastDayMode?(acc?'#3b6ec4':'#c9a030'):"#dde8f5"}`,
+                color:lastDayMode?(acc?'#fff':'#fff8ec'):"#6b7a8d",
+                boxShadow:lastDayMode?(acc?"0 2px 8px rgba(59,110,196,0.3)":"0 2px 8px rgba(184,146,42,0.3)"):"none",
                 borderRadius:6,padding:'4px 10px',fontSize:11,fontWeight:700,
                 cursor:'pointer',fontFamily:'inherit',flexShrink:0}}>
               {lastDayMode?'ON: 마지막 근무일 입력':'OFF: 퇴직일 직접 입력'}
@@ -2117,7 +2361,7 @@ function RetirementScreen({onBack,lang,setLang}){
               background:"linear-gradient(135deg,rgba(184,146,42,0.06),rgba(184,146,42,0.03))",
               border:"1px solid rgba(184,146,42,0.15)",borderRadius:10,
               fontSize:12,color:"#3a4a5c",lineHeight:1.9}}>
-              <span style={{fontWeight:800,color:"#b8922a"}}>
+              <span style={{fontWeight:800,color:accCol}}>
                 {tenure.y}년 {tenure.m}개월 {tenure.d}일
               </span>
               <span style={{color:C.txt3,marginLeft:8}}>({tenure.totalDays.toLocaleString()}일)</span>
@@ -2139,6 +2383,29 @@ function RetirementScreen({onBack,lang,setLang}){
             }/>
             <div style={{background:"#eef4fb",border:`1px solid ${C.bdrD}`,borderRadius:12,padding:14}}>
               <div style={{fontSize:12,fontWeight:800,color:C.goldL,marginBottom:10}}>퇴직 전 3개월 임금</div>
+              {prefill&&(
+                <div style={{marginBottom:12}}>
+                  <button onClick={()=>{
+                    if(!endDate){ alert(lastDayMode?'위에서 마지막 근무일을 먼저 입력해주세요':'위에서 퇴직일을 먼저 입력해주세요'); return; }
+                    const r=prefill(endDate,lastDayMode);
+                    if(!r||!r.months||!r.months.some(m=>m.total>0)){
+                      alert('해당 3개월에 출퇴근 기록이 없어 자동 입력할 내용이 없어요.\n출퇴근 탭에서 기록한 달만 채울 수 있습니다.'); return; }
+                    const[a,b,c2]=r.months;
+                    setM1(String(a.total)); setD1(String(a.days));
+                    setM2(String(b.total)); setD2s(String(b.days));
+                    setM3(String(c2.total)); setD3s(String(c2.days));
+                  }} style={{width:'100%',padding:'12px',borderRadius:10,border:'none',cursor:'pointer',
+                    background:blueGrad,color:'#fff',fontSize:12.5,fontWeight:800,fontFamily:'inherit',
+                    boxShadow:'0 3px 10px rgba(59,110,196,0.3)'}}>
+                    📥 내 출퇴근 기록으로 3개월 임금 자동 입력
+                  </button>
+                  <div style={{fontSize:9.5,color:C.txt3,marginTop:6,lineHeight:1.7}}>
+                    퇴직월 직전 3개 달력월의 계산 임금(기본+가산+주휴)을 채워요.<br/>
+                    월 중 퇴직이면 마지막 달 금액은 실제 임금으로 직접 보정하고,
+                    상여금·연차수당은 아래에 별도 입력하세요.
+                  </div>
+                </div>
+              )}
               {[
                 ['3개월 전 임금(원)',m1,setM1,d1,setD1],
                 ['2개월 전 임금(원)',m2,setM2,d2s,setD2s],
@@ -2392,17 +2659,22 @@ function PayslipScreen({onBack,lang,setLang,calcData}){
   });
   const up=(k,v)=>setFields(p=>({...p,[k]:v}));
   const [step,setStep]=useState("input");
+  const [pdfBusy,setPdfBusy]=useState(false);
 
-  const printPS=()=>{
-    const el=psRef.current; if(!el) return;
-    const w=window.open("","_blank");
-    if(!w){alert("팝업이 차단됐습니다.");return;}
-    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
-      <style>*{box-sizing:border-box}body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif}
-      @page{size:A4 portrait;margin:0}@media print{html,body{-webkit-print-color-adjust:exact}}</style>
-      </head><body>${el.innerHTML}</body></html>`);
-    w.document.close(); setTimeout(()=>{w.focus();w.print();},700);
+  const savePS=async()=>{
+    const el=psRef.current; if(!el||pdfBusy) return;
+    setPdfBusy(true);
+    await saveElementAsPDF(el, pdfFileName('임금명세서', fields.workerName||'근로자'));
+    setPdfBusy(false);
   };
+  /* ④ 물리 뒤로가기: 미리보기→입력 단계 복귀, 입력 중이면 유실 방지 확인창 */
+  const guardedBack=()=>{
+    if(step==="preview"){ setStep("input"); return true; }
+    if((fields.workerName||fields.basePay) &&
+       !confirm('작성 중인 명세서 내용이 사라집니다. 나갈까요?')) return true;
+    onBack(); return false;
+  };
+  useBackClose(true, guardedBack);
 
   const INP2={...INP,background:"#eef3f9"};
   const from_calc = !!calcData;
@@ -2412,12 +2684,13 @@ function PayslipScreen({onBack,lang,setLang,calcData}){
       fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif",maxWidth:520,margin:"0 auto"}}>
       <SubHdr
         title={step==="input"?"💴 임금명세서 작성":"📄 임금명세서 미리보기"}
-        back={step==="preview"?()=>setStep("input"):onBack}
+        back={()=>{ guardedBack(); }}
         lang={lang} setLang={setLang}
-        right={step==="preview"&&<button onClick={printPS}
-          style={{background:`linear-gradient(135deg,${C.gold},#a87028)`,color:"#f4f7fb",
+        right={step==="preview"&&<button onClick={savePS} disabled={pdfBusy}
+          style={{background:pdfBusy?'#c8b070':`linear-gradient(135deg,${C.gold},#a87028)`,color:"#f4f7fb",
             border:"none",borderRadius:8,padding:"6px 11px",fontSize:12,fontWeight:800,
-            cursor:"pointer",fontFamily:"inherit",flexShrink:0}}>🖨 PDF</button>}
+            cursor:pdfBusy?"wait":"pointer",fontFamily:"inherit",flexShrink:0}}>
+          {pdfBusy?'저장 중…':'⬇ PDF 저장'}</button>}
       />
 
       {step==="input"&&(
@@ -2511,7 +2784,7 @@ function PayslipScreen({onBack,lang,setLang,calcData}){
       {step==="preview"&&(
         <div style={{padding:"12px 10px 40px"}}>
           <div style={{fontSize:11,color:C.txt3,textAlign:"center",marginBottom:10}}>
-            📄 A4 실제 출력물과 동일 · PDF 저장 후 인쇄
+            📄 A4 실제 출력물과 동일 · 우측 상단 버튼으로 PDF 파일 저장
           </div>
           <div style={{background:"#e8eef5",borderRadius:12,padding:"12px 10px",boxShadow:"inset 0 2px 8px rgba(30,50,90,0.08)"}}>
             <ScaledPreview pRef={psRef}><PayslipPreview f={fields} pRef={psRef}/></ScaledPreview>
@@ -2537,6 +2810,11 @@ function LawScreen({onBack,lang,setLang,initN}){
   const [tog,setTog]=useState({youth:false,preg:false,foreign:false});
   const [showNa,setShowNa]=useState(false);
   const [bizName,setBizName]=useState("");
+  /* ④ 물리 뒤로가기: 단계 후퇴, 첫 단계면 닫기 */
+  useBackClose(true,()=>{
+    if(step>0){ setStep(s=>s-1); return true; }
+    onBack(); return false;
+  });
 
   const rows=useMemo(()=>OB.map(o=>({o,r:statusOf(o,n,tog,industry)})),[n,tog,industry]);
   const active=rows.filter(x=>x.r.st!=="na");
@@ -2823,29 +3101,35 @@ function ContractScreen({ onBack, workers, workplace, user }) {
       return n;
     });
   };
-  const printPDF=()=>{
-    const el=pRef.current; if(!el) return;
-    const w=window.open("","_blank");
-    if(!w){alert("팝업이 차단됐습니다.");return;}
-    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
-      <style>*{box-sizing:border-box}body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif}
-      @page{size:A4 portrait;margin:0}@media print{html,body{-webkit-print-color-adjust:exact}}</style>
-      </head><body>${el.innerHTML}</body></html>`);
-    w.document.close(); setTimeout(()=>{w.focus();w.print();},700);
+  const [pdfBusy,setPdfBusy]=useState(false);
+  const savePDF=async()=>{
+    const el=pRef.current; if(!el||pdfBusy) return;
+    setPdfBusy(true);
+    const meta0=FORM_TYPES.find(f=>f.id===ctTab);
+    await saveElementAsPDF(el, pdfFileName(meta0?meta0.label:'근로계약서', curCt.worker||'근로자'));
+    setPdfBusy(false);
   };
+  /* ④ 물리 뒤로가기: 미리보기→입력 단계 복귀, 입력 중이면 유실 방지 확인창 */
+  const guardedBack=()=>{
+    if(ctStep==="preview"){ setCtStep("input"); return true; }
+    if(curCt.worker && !confirm('작성 중인 계약서 내용이 사라집니다. 나갈까요?')) return true;
+    onBack(); return false;
+  };
+  useBackClose(true, guardedBack);
     const Prev=PrevMap[ctTab]; const Inp=InputMap[ctTab];
     const meta=FORM_TYPES.find(f=>f.id===ctTab);
     return(
       <div style={{background:'#f6f9fd',minHeight:"100vh",fontFamily:"-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif"}}>
         <SubHdr title={ctStep==="input"?`${meta.ic} ${meta.label}`:"📄 미리보기"}
-          back={ctStep==="preview"?()=>setCtStep("input"):onBack}
+          back={()=>{ guardedBack(); }}
           lang={"ko"} setLang={()=>{}}
           right={ctStep==="preview"&&(
-            <button onClick={printPDF} style={{
-              background:"linear-gradient(135deg,#d4a83c,#b8922a)",
+            <button onClick={savePDF} disabled={pdfBusy} style={{
+              background:pdfBusy?'#c8b070':"linear-gradient(135deg,#d4a83c,#b8922a)",
               color:"#fff8ec",border:"none",borderRadius:9,padding:"7px 13px",fontSize:12,
-              fontWeight:800,cursor:"pointer",fontFamily:"inherit",flexShrink:0,
-              boxShadow:"0 2px 8px rgba(184,146,42,0.35)"}}>🖨 PDF</button>
+              fontWeight:800,cursor:pdfBusy?"wait":"pointer",fontFamily:"inherit",flexShrink:0,
+              boxShadow:"0 2px 8px rgba(184,146,42,0.35)"}}>
+              {pdfBusy?'저장 중…':'⬇ PDF 저장'}</button>
           )}/>
 
         {ctStep==="input"&&(
@@ -2893,7 +3177,7 @@ function ContractScreen({ onBack, workers, workplace, user }) {
         {ctStep==="preview"&&(
           <div style={{padding:"12px 10px 40px"}}>
             <div style={{fontSize:11,color:C.txt3,textAlign:"center",marginBottom:10}}>
-              📄 A4 실제 출력물과 동일 · PDF 저장 후 인쇄
+              📄 A4 실제 출력물과 동일 · 우측 상단 버튼으로 PDF 파일 저장
             </div>
             <div style={{background:"#e8eef5",borderRadius:12,padding:"12px 10px",boxShadow:"inset 0 2px 8px rgba(30,50,90,0.08)"}}>
               <ScaledPreview pRef={pRef}><Prev f={curCt}/></ScaledPreview>
@@ -3910,6 +4194,7 @@ function EmployerApp({ user }) {
   const [sub, setSub] = useState(null);        // diagnosis | contract | payslip | retire
   const [psData, setPsData] = useState(null);  // 임금명세서 자동입력 데이터
   const [loading, setLoading] = useState(true);
+  useTabBack(tab, setTab); // ④ 물리 뒤로가기: 비-home 탭이면 홈으로
 
   const load = useCallback(async () => {
     const { data: wp } = await sb.from('workplaces')
@@ -3978,24 +4263,26 @@ function EmployerApp({ user }) {
    근로자 — 임금체불 진정용 증거자료 PDF
    출퇴근 시각 + GPS 좌표 + 확인 상태 + 임금 계산 내역
 ============================================================ */
-function exportEvidencePDF({ userName, workplaceName, month, recs, hourly, sojeongH,
-                             is5plus, calc, actual }) {
-  const w = window.open('', '_blank');
-  if (!w) { alert('팝업이 차단됐습니다. 브라우저에서 팝업을 허용한 뒤 다시 시도해주세요.'); return; }
+async function exportEvidencePDF({ userName, workplaceName, month, recs, hourly, sojeongH,
+                             is5plus, calc, actual, sched }) {
   const fmt = n => Number(n || 0).toLocaleString();
   const sorted = recs.slice().sort((a, b) => a.date < b.date ? -1 : 1);
   const gpsCell = (lat, lng, acc) => lat
     ? `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}${acc ? ` (±${acc}m)` : ''}` : '−';
   const stLabel = s => s === 'approved' ? '사업주 확인' : s === 'pending' ? '확인 대기' : '본인 기록';
-  let totalH = 0;
+  let totalH = 0, hasPend = false, hasExcl = false;
   const rows = sorted.map(r => {
-    const h = r.out_time ? calcDayHours(r) : 0; totalH += h;
+    const ap = (sched && r.out_time) ? applySched(r, sched, false) : null;
+    const h = r.out_time ? recognizedHours(r, sched) : 0; totalH += h;
+    let flag = '';
+    if (ap && ap.pendMin > 0) { flag = ' <b>△</b>'; hasPend = true; }
+    else if (ap && ap.exclMin > 0) { flag = ' †'; hasExcl = true; }
     return `<tr>
       <td>${r.date} (${wdayKo(r.date)})</td>
       <td style="text-align:center">${r.in_time || '−'}</td>
       <td style="text-align:center">${r.out_time || '−'}</td>
       <td style="text-align:center">${r.break_h || 0}h${r.break_paid ? '(유급)' : ''}</td>
-      <td style="text-align:center">${h ? h.toFixed(1) + 'h' : '−'}</td>
+      <td style="text-align:center">${h ? h.toFixed(1) + 'h' + flag : '−'}</td>
       <td style="font-size:7.5pt">${gpsCell(r.in_lat, r.in_lng, r.in_acc)}</td>
       <td style="font-size:7.5pt">${gpsCell(r.out_lat, r.out_lng, r.out_acc)}</td>
       <td style="text-align:center;font-size:8pt">${stLabel(r.status)}</td>
@@ -4007,39 +4294,45 @@ function exportEvidencePDF({ userName, workplaceName, month, recs, hourly, sojeo
   const now = new Date();
   const stamp = `${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
   const gaSan = is5plus ? '상시 5인 이상 (연장·야간 가산 적용)' : '상시 5인 미만 (가산수당 적용 제외)';
+  const schedTxt = sched ? ` · 소정 시업~종업 ${sched.start}~${sched.end}` : '';
 
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
-  <style>
-    *{box-sizing:border-box} body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#000}
-    .page{width:210mm;min-height:297mm;padding:16mm 14mm;margin:0 auto;background:#fff}
-    h1{font-size:15pt;text-align:center;margin:0 0 4mm;letter-spacing:1px}
-    .sub{text-align:center;font-size:9pt;color:#444;margin-bottom:6mm}
-    table{width:100%;border-collapse:collapse;font-size:9pt;margin-bottom:5mm}
-    th,td{border:1px solid #000;padding:3px 5px;vertical-align:middle}
-    th{background:#f0f0f0;font-weight:bold;text-align:center;font-size:8.5pt}
-    .kv td:first-child{background:#f7f7f7;width:32mm;font-weight:bold}
-    .pay td:last-child{text-align:right}
-    .dim{color:#666}
-    .note{font-size:8pt;line-height:1.7;color:#333;border:1px solid #999;padding:3mm;margin-top:4mm}
-    @page{size:A4 portrait;margin:0} @media print{html,body{-webkit-print-color-adjust:exact}}
-  </style></head><body><div class="page">
+  const html = `<style>
+    .ngpdf{box-sizing:border-box;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#000;
+      width:794px;min-height:1123px;padding:60px 53px;background:#fff}
+    .ngpdf *{box-sizing:border-box}
+    .ngpdf h1{font-size:15pt;text-align:center;margin:0 0 15px;letter-spacing:1px}
+    .ngpdf .sub{text-align:center;font-size:9pt;color:#444;margin-bottom:22px}
+    .ngpdf table{width:100%;border-collapse:collapse;font-size:9pt;margin-bottom:19px}
+    .ngpdf th,.ngpdf td{border:1px solid #000;padding:3px 5px;vertical-align:middle}
+    .ngpdf th{background:#f0f0f0;font-weight:bold;text-align:center;font-size:8.5pt}
+    .ngpdf .kv td:first-child{background:#f7f7f7;width:120px;font-weight:bold}
+    .ngpdf .pay td:last-child{text-align:right}
+    .ngpdf .dim{color:#666}
+    .ngpdf .note{font-size:8pt;line-height:1.7;color:#333;border:1px solid #999;padding:11px;margin-top:15px}
+  </style><div class="ngpdf">
     <h1>근로사실 확인자료 (임금체불 진정 첨부용)</h1>
     <div class="sub">본 문서는 근로자 본인이 「노무길잡이」 앱으로 기록한 출퇴근 내역과 자동 계산 결과를 정리한 것입니다.</div>
 
     <table class="kv">
-      <tr><td>작성자(근로자)</td><td>${userName}</td><td style="background:#f7f7f7;width:32mm;font-weight:bold">사업장</td><td>${workplaceName || '(미연결 · 개인 기록)'}</td></tr>
+      <tr><td>작성자(근로자)</td><td>${userName}</td><td style="background:#f7f7f7;width:120px;font-weight:bold">사업장</td><td>${workplaceName || '(미연결 · 개인 기록)'}</td></tr>
       <tr><td>대상 기간</td><td>${month} (1일 ~ 말일)</td><td style="background:#f7f7f7;font-weight:bold">출력 일시</td><td>${stamp}</td></tr>
-      <tr><td>적용 근로조건</td><td colspan="3">시급 ${fmt(hourly)}원 · 1일 소정근로 ${sojeongH}시간 · ${gaSan} (앱 등록 기준)</td></tr>
+      <tr><td>적용 근로조건</td><td colspan="3">시급 ${fmt(hourly)}원 · 1일 소정근로 ${sojeongH}시간 · ${gaSan}${schedTxt} (앱 등록 기준)</td></tr>
     </table>
 
     <table>
-      <tr><th style="width:24mm">날짜</th><th>출근</th><th>퇴근</th><th>휴게</th><th>인정시간</th>
+      <tr><th style="width:90px">날짜</th><th>출근</th><th>퇴근</th><th>휴게</th><th>인정시간</th>
           <th>출근 GPS (위도, 경도)</th><th>퇴근 GPS (위도, 경도)</th><th>상태</th></tr>
       ${rows || '<tr><td colspan="8" style="text-align:center;color:#888">해당 월 기록 없음</td></tr>'}
       <tr><th colspan="4" style="text-align:right">합계</th>
           <th>${totalH.toFixed(1)}h</th>
           <th colspan="3" style="font-size:8pt">근무 ${sorted.length}일 · GPS 기록 ${gpsN}건</th></tr>
     </table>
+    ${(hasPend || hasExcl || calc.pendMin > 0 || calc.exclMin > 0) ? `
+    <div style="font-size:8pt;color:#333;margin:-12px 0 15px;line-height:1.6">
+      ※ 출근·퇴근 시각은 기록 당시 그대로 보존되며, '인정시간'은 소정 시업~종업 기준으로 산정한 값입니다.<br/>
+      ${hasPend || calc.pendMin > 0 ? `&nbsp;&nbsp;<b>△</b> 소정시각 밖 구간 중 미분류 ${fmtH(calc.pendMin || 0)} — 업무 여부 분류 전까지 계산에서 제외됨<br/>` : ''}
+      ${hasExcl || calc.exclMin > 0 ? `&nbsp;&nbsp;† 소정시각 밖 구간 ${fmtH(calc.exclMin || 0)} — 근로자 본인이 '자발적 대기'로 분류하여 제외함` : ''}
+    </div>` : ''}
 
     <table class="pay">
       <tr><th colspan="2">임금 계산 내역 (세전, 주휴 포함)</th></tr>
@@ -4067,9 +4360,8 @@ function exportEvidencePDF({ userName, workplaceName, month, recs, hourly, sojeo
       참고자료로 활용될 수 있습니다. 다만 체불 여부와 금액의 법적 판단은 관할 노동청의 조사로
       확정되며, 본 문서 자체가 법적 효력을 갖는 것은 아닙니다.
     </div>
-  </div></body></html>`);
-  w.document.close();
-  setTimeout(() => { w.focus(); w.print(); }, 700);
+  </div>`;
+  return await saveHTMLAsPDF(html, pdfFileName('근로사실확인자료', userName, month));
 }
 
 /* ============================================================
@@ -4081,25 +4373,38 @@ function WorkerSetup({ user, onDone }) {
   const prev = loadWorkerSettings();
   const [step, setStep] = useState(1);
   const [is5plus, setIs5plus] = useState(prev ? prev.is5plus : null);
-  const [hourlyStr, setHourlyStr] = useState(prev ? withCommas(String(prev.hourly)) : withCommas(String(MIN_WAGE)));
   const [sojeongStr, setSojeongStr] = useState(prev ? String(prev.sojeongH) : '8');
   const [wpName, setWpName] = useState(prev ? prev.wpName : '');
   const [showWhy, setShowWhy] = useState(false);
+  // ① 임금유형 입력 레이어
+  const [wageType, setWageType] = useState(prev?.wageType || 'hourly');
+  const [amountStr, setAmountStr] = useState(
+    prev ? withCommas(String(prev.wageAmount || prev.hourly)) : withCommas(String(MIN_WAGE)));
+  const [daysPerWeek, setDaysPerWeek] = useState(prev?.daysPerWeek || 5);
+  const [juhyuIncl, setJuhyuIncl] = useState(prev ? prev.weeklyIncludesJuhyu !== false : true);
+  // ② 소정 시업·종업 시각 (선택 — 출퇴근 판정 기준)
+  const [stTime, setStTime] = useState(prev?.startTime || '');
+  const [enTime, setEnTime] = useState(prev?.endTime || '');
   // 초대코드 연결 (선택)
   const [showCode, setShowCode] = useState(false);
   const [code, setCode] = useState('');
   const [codeErr, setCodeErr] = useState('');
   const [connecting, setConnecting] = useState(false);
 
-  const hourly = Number(onlyDigits(hourlyStr)) || 0;
+  const amount = Number(onlyDigits(amountStr)) || 0;
   const sojeongH = parseFloat(sojeongStr) || 0;
-  const condOk = hourly > 0 && sojeongH > 0 && sojeongH <= 12;
+  const conv = toHourlyWage({ wageType, amount, sojeongH, daysPerWeek, weeklyIncludesJuhyu: juhyuIncl });
+  const hourly = conv ? Math.floor(conv.hourly) : 0;
+  const condOk = amount > 0 && sojeongH > 0 && sojeongH <= 12 && hourly > 0;
 
   const buildSettings = () => ({
     done: true, is5plus: !!is5plus,
     hourly: hourly || MIN_WAGE,
     sojeongH: sojeongH || 8,
-    wpName: wpName.trim()
+    wpName: wpName.trim(),
+    wageType, wageAmount: amount || MIN_WAGE,
+    daysPerWeek, weeklyIncludesJuhyu: juhyuIncl,
+    startTime: stTime, endTime: enTime
   });
 
   const finish = () => onDone(buildSettings(), null, null);
@@ -4237,34 +4542,8 @@ function WorkerSetup({ user, onDone }) {
               근로계약서에 적힌 내용 기준 · 나중에 수정 가능
             </div>
 
+            {/* 1) 소정근로시간 — 환산의 기준이므로 먼저 */}
             <Card style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>시급</div>
-              <div style={{ position: 'relative' }}>
-                <input value={hourlyStr} inputMode="numeric"
-                  onChange={e => setHourlyStr(withCommas(e.target.value))}
-                  placeholder={withCommas(String(MIN_WAGE))}
-                  style={{ width: '100%', minHeight: 50, padding: '12px 44px 12px 14px',
-                    fontSize: 19, fontWeight: 900, color: C.t1, textAlign: 'right',
-                    border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff' }}
-                  onFocus={e => e.target.style.borderColor = C.blue}
-                  onBlur={e => e.target.style.borderColor = C.border} />
-                <span style={{ position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
-                  fontSize: 13, fontWeight: 800, color: C.t3 }}>원</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-                <button onClick={() => setHourlyStr(withCommas(String(MIN_WAGE)))} style={{
-                  padding: '6px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
-                  background: hourly === MIN_WAGE ? 'rgba(59,110,196,0.1)' : '#fff',
-                  border: `1.5px solid ${hourly === MIN_WAGE ? C.blue : C.border}`,
-                  color: hourly === MIN_WAGE ? C.blue : C.t2, fontSize: 11, fontWeight: 800
-                }}>2026 최저시급 {MIN_WAGE.toLocaleString()}원</button>
-                {hourly > 0 && hourly < MIN_WAGE && (
-                  <span style={{ fontSize: 10.5, fontWeight: 800, color: C.red }}>⚠️ 최저임금 미달</span>
-                )}
-              </div>
-            </Card>
-
-            <Card style={{ marginTop: 10 }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 3 }}>1일 소정근로시간</div>
               <div style={{ fontSize: 10, color: C.t3, marginBottom: 9 }}>
                 계약서에 적힌 "하루에 일하기로 약속한 시간" (휴게 제외) — 이 시간을 넘기면 연장근로
@@ -4286,6 +4565,123 @@ function WorkerSetup({ user, onDone }) {
               {sojeongStr !== '' && (!(sojeongH > 0) || sojeongH > 12) && (
                 <div style={{ fontSize: 10.5, color: C.red, fontWeight: 700, marginTop: 6 }}>
                   0보다 크고 12 이하로 입력해주세요 (예: 7.5)
+                </div>
+              )}
+            </Card>
+
+            {/* 2) 임금유형 + 금액 + 환산 */}
+            <Card style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>임금을 어떻게 받기로 했나요?</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+                {WAGE_TYPES.map(w => (
+                  <button key={w.id} onClick={() => setWageType(w.id)} style={{
+                    padding: '10px 2px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit',
+                    background: wageType === w.id ? blueGrad : '#fff',
+                    color: wageType === w.id ? '#fff' : C.t2,
+                    border: wageType === w.id ? 'none' : `1.5px solid ${C.border}`,
+                    fontSize: 12.5, fontWeight: 800
+                  }}>{w.label}</button>
+                ))}
+              </div>
+              <div style={{ position: 'relative' }}>
+                <input value={amountStr} inputMode="numeric"
+                  onChange={e => setAmountStr(withCommas(e.target.value))}
+                  placeholder={wageType === 'hourly' ? withCommas(String(MIN_WAGE)) : wageType === 'daily' ? '예: 82,560' : wageType === 'weekly' ? '예: 500,000' : '예: 2,156,880'}
+                  style={{ width: '100%', minHeight: 50, padding: '12px 64px 12px 14px',
+                    fontSize: 19, fontWeight: 900, color: C.t1, textAlign: 'right',
+                    border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff' }}
+                  onFocus={e => e.target.style.borderColor = C.blue}
+                  onBlur={e => e.target.style.borderColor = C.border} />
+                <span style={{ position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+                  fontSize: 13, fontWeight: 800, color: C.t3 }}>
+                  {(WAGE_TYPES.find(w => w.id === wageType) || {}).unit || '원'}
+                </span>
+              </div>
+              {wageType === 'hourly' && (
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={() => setAmountStr(withCommas(String(MIN_WAGE)))} style={{
+                    padding: '6px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                    background: amount === MIN_WAGE ? 'rgba(59,110,196,0.1)' : '#fff',
+                    border: `1.5px solid ${amount === MIN_WAGE ? C.blue : C.border}`,
+                    color: amount === MIN_WAGE ? C.blue : C.t2, fontSize: 11, fontWeight: 800
+                  }}>2026 최저시급 {MIN_WAGE.toLocaleString()}원</button>
+                </div>
+              )}
+              {(wageType === 'weekly' || wageType === 'monthly') && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 800, color: C.t2, marginBottom: 6 }}>주 근무일수</div>
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    {[2,3,4,5,6].map(d => (
+                      <button key={d} onClick={() => setDaysPerWeek(d)} style={{
+                        flex: 1, padding: '9px 2px', borderRadius: 9, cursor: 'pointer', fontFamily: 'inherit',
+                        background: daysPerWeek === d ? blueGrad : '#fff',
+                        color: daysPerWeek === d ? '#fff' : C.t2,
+                        border: daysPerWeek === d ? 'none' : `1.5px solid ${C.border}`,
+                        fontSize: 12, fontWeight: 800
+                      }}>{d}일</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {wageType === 'weekly' && (
+                <div onClick={() => setJuhyuIncl(!juhyuIncl)} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer',
+                  background: '#f7fafd', border: `1px solid ${C.border}`, borderRadius: 9, padding: '9px 11px' }}>
+                  <span style={{ fontSize: 14 }}>{juhyuIncl ? '☑' : '☐'}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: C.t2, lineHeight: 1.5 }}>
+                    주급에 주휴수당이 포함돼 있어요 (모르면 체크 유지)
+                  </span>
+                </div>
+              )}
+              {/* 환산 결과 */}
+              {conv && wageType !== 'hourly' && (
+                <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10,
+                  background: 'linear-gradient(135deg,#eff6ff,#e0edff)', border: `1px solid rgba(59,110,196,0.3)` }}>
+                  <div style={{ fontSize: 10, color: C.t3 }}>환산 통상시급 (계산에 적용)</div>
+                  <div style={{ fontSize: 17, fontWeight: 900, color: hourly < MIN_WAGE ? C.red : C.blue, marginTop: 2 }}>
+                    {hourly.toLocaleString()}원
+                  </div>
+                  <div style={{ fontSize: 9.5, color: C.t3, marginTop: 4, lineHeight: 1.6 }}>{conv.formula}</div>
+                </div>
+              )}
+              {amount > 0 && !conv && wageType !== 'hourly' && (
+                <div style={{ fontSize: 10.5, color: C.goldD, fontWeight: 700, marginTop: 8 }}>
+                  ⬆ 위 소정근로시간{(wageType !== 'daily') ? '·주 근무일수' : ''}를 입력하면 시급으로 환산해드려요
+                </div>
+              )}
+              {hourly > 0 && hourly < MIN_WAGE && (
+                <div style={{ fontSize: 10.5, fontWeight: 800, color: C.red, marginTop: 8 }}>
+                  ⚠️ 환산 시급이 2026 최저임금({MIN_WAGE.toLocaleString()}원)보다 낮아요 — 차액 청구 가능
+                </div>
+              )}
+              {(wageType === 'weekly' || wageType === 'monthly') && (
+                <div style={{ fontSize: 9.5, color: C.t3, marginTop: 8, lineHeight: 1.6 }}>
+                  ※ 식대·고정수당·포괄임금이 섞인 금액이면 환산 시급이 실제보다 높게 나올 수 있어요 (참고용)
+                </div>
+              )}
+            </Card>
+
+            {/* 3) 약속한 출퇴근 시각 (선택 — ② 판정 기준) */}
+            <Card style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 3 }}>약속한 출퇴근 시각 (선택)</div>
+              <div style={{ fontSize: 10, color: C.t3, marginBottom: 9, lineHeight: 1.6 }}>
+                계약서의 시업~종업 시각. 입력하면 일찍 출근·늦게 퇴근한 시간을
+                <b> 업무였는지 구분</b>해 임금을 더 정확히 계산해요 (비우면 찍은 시각 그대로 계산)
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center' }}>
+                <input type="time" value={stTime} onChange={e => setStTime(e.target.value)}
+                  style={{ minHeight: 46, padding: '10px', fontSize: 15, fontWeight: 800, textAlign: 'center',
+                    border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff',
+                    fontFamily: 'inherit', color: C.t1, WebkitAppearance: 'none' }} />
+                <span style={{ fontSize: 13, color: C.t3, fontWeight: 800 }}>~</span>
+                <input type="time" value={enTime} onChange={e => setEnTime(e.target.value)}
+                  style={{ minHeight: 46, padding: '10px', fontSize: 15, fontWeight: 800, textAlign: 'center',
+                    border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff',
+                    fontFamily: 'inherit', color: C.t1, WebkitAppearance: 'none' }} />
+              </div>
+              {(stTime || enTime) && !(stTime && enTime) && (
+                <div style={{ fontSize: 10, color: C.goldD, fontWeight: 700, marginTop: 6 }}>
+                  시업·종업을 모두 입력해야 판정이 켜져요 (하나만 입력 시 적용 안 됨)
                 </div>
               )}
             </Card>
@@ -4320,11 +4716,22 @@ function WorkerSetup({ user, onDone }) {
                 <b>{wpName.trim() || '(이름 없음)'} · {is5plus ? '5인 이상' : '5인 미만'}</b>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
-                <span style={{ opacity: 0.85 }}>시급</span><b>{hourly.toLocaleString()}원</b>
+                <span style={{ opacity: 0.85 }}>{(WAGE_TYPES.find(w => w.id === wageType) || {}).label || '시급'}</span>
+                <b>{amount.toLocaleString()}{(WAGE_TYPES.find(w => w.id === wageType) || {}).unit || '원'}</b>
               </div>
+              {wageType !== 'hourly' && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
+                  <span style={{ opacity: 0.85 }}>환산 통상시급</span><b>{hourly.toLocaleString()}원</b>
+                </div>
+              )}
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
                 <span style={{ opacity: 0.85 }}>1일 소정근로</span><b>{sojeongH}시간</b>
               </div>
+              {stTime && enTime && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 12 }}>
+                  <span style={{ opacity: 0.85 }}>약속 시각</span><b>{stTime} ~ {enTime}</b>
+                </div>
+              )}
             </Card>
 
             <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, margin: '14px 0 7px' }}>
@@ -4431,11 +4838,11 @@ function WorkerNav({ tab, setTab }) {
 /* ============================================================
    근로자 — 홈
 ============================================================ */
-function WorkerHome({ user, workplace, workerInfo, records, settings, setTab }) {
+function WorkerHome({ user, workplace, workerInfo, records, settings, setTab, openSub }) {
   const thisMonth = new Date().toISOString().slice(0,7);
   const monthRecs = records.filter(r => r.date?.startsWith(thisMonth) && r.out_time);
-  const { hourly, sojeongH, is5plus } = effectiveCond(workerInfo, settings);
-  const m = calcWorkerMonth(monthRecs, hourly, sojeongH, is5plus);
+  const { hourly, sojeongH, is5plus, sched } = effectiveCond(workerInfo, settings);
+  const m = calcWorkerMonth(monthRecs, hourly, sojeongH, is5plus, sched);
 
   const allRecs = records.filter(r => r.out_time);
   const gpsCount = allRecs.filter(r => r.in_lat).length;
@@ -4511,6 +4918,16 @@ function WorkerHome({ user, workplace, workerInfo, records, settings, setTab }) 
           </div>
         </Card>
 
+        {sched && m.pendMin > 0 && (
+          <Card onClick={() => setTab('pay')} style={{ background: '#fffbeb', borderColor: '#fde68a',
+            marginBottom: 10, padding: 11, cursor: 'pointer' }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: '#92400e', lineHeight: 1.6 }}>
+              ⏱ 약속 시각 밖 미분류 {fmtH(m.pendMin)} — 업무였다면 최대 +{won(m.pendDelta)}원<br/>
+              <span style={{ fontWeight: 700, color: C.t2 }}>내 임금 탭에서 분류하기 ›</span>
+            </div>
+          </Card>
+        )}
+
         {hourly < MIN_WAGE && (
           <Card style={{ background: '#fff5f5', borderColor: '#fed7d7', marginBottom: 10 }}>
             <div style={{ fontSize: 11, fontWeight: 800, color: C.red }}>
@@ -4563,6 +4980,12 @@ function WorkerHome({ user, workplace, workerInfo, records, settings, setTab }) 
           <Btn variant="secondary" size="lg" onClick={() => setTab('pay')}>
             💰 내 임금 확인
           </Btn>
+          <Btn variant="secondary" size="lg" onClick={() => openSub && openSub('sim')}>
+            🧮 예상 임금 계산
+          </Btn>
+          <Btn variant="secondary" size="lg" onClick={() => openSub && openSub('retire')}>
+            🏦 퇴직금 계산
+          </Btn>
         </div>
       </div>
     </div>
@@ -4572,11 +4995,87 @@ function WorkerHome({ user, workplace, workerInfo, records, settings, setTab }) 
 /* ============================================================
    근로자 — 출퇴근 기록
 ============================================================ */
-function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
+/* ============================================================
+   ② 출퇴근 분류 팝업 — 소정시각 밖 구간의 업무 여부 선택
+   (모듈 최상위 정의: 부모 내부 정의 시 리렌더마다 리마운트되어
+    모바일 포커스가 깨지므로 반드시 여기 둔다)
+============================================================ */
+function ClassifyModal({ rec, sched, busy, onPick, onClose }) {
+  if (!rec || !sched) return null;
+  const seg = splitSched(rec, sched);
+  if (!seg) return null;
+  const ap = applySched(rec, sched, false);
+  const parts = [];
+  if (ap.pendEarly) parts.push(`조기 출근 ${fmtH(seg.earlyMin)} (${rec.in_time}~${sched.start})`);
+  if (ap.pendLate) parts.push(`늦은 퇴근 ${fmtH(seg.lateMin)} (${sched.end}~${rec.out_time})`);
+  if (!parts.length) return null;
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300,
+      background: 'rgba(15,25,45,0.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 520,
+        background: '#fff', borderRadius: '18px 18px 0 0', padding: '18px 18px 26px',
+        boxShadow: '0 -8px 30px rgba(15,25,45,0.25)' }}>
+        <div style={{ fontSize: 14, fontWeight: 900, color: C.t1 }}>⏱ 약속 시각 밖 기록이 있어요</div>
+        <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>{rec.date} · 약속 {sched.start}~{sched.end}</div>
+        <div style={{ marginTop: 10, padding: '10px 12px', background: '#fffbeb',
+          border: '1px solid #fde68a', borderRadius: 10 }}>
+          {parts.map((p, i) => (
+            <div key={i} style={{ fontSize: 12, fontWeight: 800, color: '#92400e', lineHeight: 1.8 }}>△ {p}</div>
+          ))}
+        </div>
+        <div style={{ fontSize: 10.5, color: C.t2, lineHeight: 1.7, margin: '10px 2px 12px' }}>
+          이 시간이 <b>사장님 지시·승인이 있었던 업무</b>라면 임금 계산에 포함돼요.
+          그냥 일찍 오거나 남아 있던 시간이면 제외돼요. 찍은 시각 자체는 그대로 보존됩니다.
+        </div>
+        <button disabled={busy} onClick={() => onPick('claimed')} style={{
+          width: '100%', padding: '14px', borderRadius: 12, border: 'none', cursor: 'pointer',
+          background: 'linear-gradient(135deg,#2d8a5a,#3aab72)', color: '#fff',
+          fontSize: 13.5, fontWeight: 900, fontFamily: 'inherit', marginBottom: 8,
+          boxShadow: '0 4px 14px rgba(45,138,90,0.3)' }}>
+          ✓ 업무 지시·승인 있었음 → 임금에 포함
+        </button>
+        <button disabled={busy} onClick={() => onPick('excluded')} style={{
+          width: '100%', padding: '14px', borderRadius: 12, cursor: 'pointer',
+          background: '#fff', border: `1.5px solid ${C.border}`, color: C.t2,
+          fontSize: 13.5, fontWeight: 800, fontFamily: 'inherit', marginBottom: 8 }}>
+          자발적 대기 (그냥 일찍 왔어요) → 제외
+        </button>
+        <button disabled={busy} onClick={onClose} style={{
+          width: '100%', padding: '11px', borderRadius: 12, cursor: 'pointer',
+          background: 'transparent', border: 'none', color: C.t3,
+          fontSize: 12, fontWeight: 700, fontFamily: 'inherit' }}>
+          나중에 분류할게요 (계산에서 일단 제외)
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WorkerRecord({ user, workplace, workerInfo, records, settings, onRefresh }) {
   const today = todayStr();
   const todayRec = records.find(r => r.date === today);
   const clockedIn = !!(todayRec?.in_time);
   const clockedOut = !!(todayRec?.out_time);
+  const { sched } = effectiveCond(workerInfo, settings);   // ② 판정 기준
+  const [clsRec, setClsRec] = useState(null);              // 분류 팝업 대상
+  const [clsBusy, setClsBusy] = useState(false);
+  const totalPend = sched ? records.reduce((a, r) => a + pendingMinOf(r, sched), 0) : 0;
+
+  /* ② 분류 저장 — 미분류 구간(조기/늦은)에만 type 기록 */
+  const saveClassify = async (type) => {
+    const r = clsRec;
+    if (!r || !sched || clsBusy) { setClsRec(null); return; }
+    setClsBusy(true);
+    const ap = applySched(r, sched, false);
+    const upd = {};
+    if (ap.pendEarly) upd.early_type = type;
+    if (ap.pendLate) upd.late_type = type;
+    if (Object.keys(upd).length && r.id)
+      await sb.from(workplace ? 'attendance' : 'personal_records').update(upd).eq('id', r.id);
+    setClsBusy(false);
+    setClsRec(null);
+    onRefresh();
+  };
 
   const [useGPS, setUseGPS] = useState(true);
   const [gpsLoading, setGpsLoading] = useState(false);
@@ -4609,6 +5108,9 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
       status: workplace ? 'pending' : 'approved',
       source: 'worker'
     };
+    // ② 분류 플래그: 명시된 경우만 포함 (기존값 보존)
+    if (rec.early_type !== undefined) base.early_type = rec.early_type;
+    if (rec.late_type !== undefined) base.late_type = rec.late_type;
 
     if (rec.id) {
       await sb.from(workplace ? 'attendance' : 'personal_records')
@@ -4644,6 +5146,11 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
       ...todayRec, out_time: t,
       out_lat: gps?.lat, out_lng: gps?.lng, out_acc: gps?.acc,
     });
+    // ② 약속 시각 밖 구간 → 즉시 분류 안내
+    if (sched && todayRec?.id) {
+      const r2 = { ...todayRec, out_time: t };
+      if (pendingMinOf(r2, sched) > 0) setClsRec(r2);
+    }
   };
 
   const manualSave = async () => {
@@ -4659,6 +5166,24 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
       break_h: brk, break_paid: manBreakPaid
     });
     setShowManual(false);
+    // ② 약속 시각 밖 구간 → 분류 안내 (신규 행은 id 조회)
+    if (sched) {
+      const probe = { date: manDate, in_time: manIn, out_time: manOut,
+        break_h: brk, break_paid: manBreakPaid,
+        early_type: existing?.early_type ?? null, late_type: existing?.late_type ?? null };
+      if (pendingMinOf(probe, sched) > 0) {
+        let id = existing?.id;
+        if (!id) {
+          const tbl = workplace ? 'attendance' : 'personal_records';
+          const q = workplace
+            ? sb.from(tbl).select('*').eq('worker_id', workerInfo?.id).eq('date', manDate)
+            : sb.from(tbl).select('*').eq('user_id', user.id).eq('date', manDate);
+          const { data } = await q.single();
+          id = data?.id;
+        }
+        if (id) setClsRec({ ...probe, id });
+      }
+    }
   };
 
   return (
@@ -4802,33 +5327,63 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
         )}
 
         {/* 기록 목록 */}
-        <div style={{ fontSize: 12, fontWeight: 800, color: C.t2, marginBottom: 8 }}>
-          📋 전체 기록 ({records.length}건)
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, color: C.t2 }}>
+            📋 전체 기록 ({records.length}건)
+          </span>
+          {totalPend > 0 && (
+            <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 900, color: '#92400e',
+              background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 20, padding: '3px 10px' }}>
+              △ 미분류 {fmtH(totalPend)}
+            </span>
+          )}
         </div>
-        {records.slice().reverse().slice(0, 20).map(r => (
-          <Card key={r.id} style={{ marginBottom: 6, padding: 10 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700 }}>{r.date}</span>
-                  {r.in_lat ? <Badge color="blue">📍GPS</Badge> : <Badge color="gray">시각</Badge>}
-                  {r.status === 'pending' && <Badge color="gold">승인대기</Badge>}
-                  {r.status === 'approved' && <Badge color="green">✓</Badge>}
+        {totalPend > 0 && (
+          <div style={{ fontSize: 9.5, color: C.t3, marginBottom: 8, lineHeight: 1.5 }}>
+            약속 시각 밖에 찍힌 시간이 있어요 — △ 표시된 날짜를 누르면 업무 여부를 분류할 수 있어요
+          </div>
+        )}
+        {records.slice().reverse().slice(0, 20).map(r => {
+          const p = sched && r.out_time ? pendingMinOf(r, sched) : 0;
+          const claimed = r.early_type === 'claimed' || r.late_type === 'claimed';
+          const excl = r.early_type === 'excluded' || r.late_type === 'excluded';
+          return (
+            <Card key={r.id} onClick={p > 0 ? () => setClsRec(r) : undefined}
+              style={{ marginBottom: 6, padding: 10,
+                cursor: p > 0 ? 'pointer' : 'default',
+                borderColor: p > 0 ? '#fde68a' : C.border,
+                background: p > 0 ? '#fffdf6' : '#fff' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>{r.date}</span>
+                    {r.in_lat ? <Badge color="blue">📍GPS</Badge> : <Badge color="gray">시각</Badge>}
+                    {r.status === 'pending' && <Badge color="gold">승인대기</Badge>}
+                    {r.status === 'approved' && <Badge color="green">✓</Badge>}
+                    {p > 0 && <Badge color="red">△ 미분류 {fmtH(p)}</Badge>}
+                    {p === 0 && claimed && <Badge color="green">초과 포함</Badge>}
+                    {p === 0 && excl && !claimed && <Badge color="gray">대기 제외</Badge>}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.t3 }}>
+                    {r.in_time} ~ {r.out_time || '-'}
+                    {r.out_time && ` · ${calcDayHours(r).toFixed(1)}h`}
+                    {p > 0 && <span style={{ color: '#b45309', fontWeight: 700 }}> · 눌러서 분류 ›</span>}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: C.t3 }}>
-                  {r.in_time} ~ {r.out_time || '-'}
-                  {r.out_time && ` · ${calcDayHours(r).toFixed(1)}h`}
-                </div>
+                {r.in_lat && (
+                  <a href={`https://www.google.com/maps?q=${r.in_lat},${r.in_lng}`}
+                     target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                     style={{ fontSize: 16, textDecoration: 'none' }}>🗺️</a>
+                )}
               </div>
-              {r.in_lat && (
-                <a href={`https://www.google.com/maps?q=${r.in_lat},${r.in_lng}`}
-                   target="_blank" rel="noreferrer"
-                   style={{ fontSize: 16, textDecoration: 'none' }}>🗺️</a>
-              )}
-            </div>
-          </Card>
-        ))}
+            </Card>
+          );
+        })}
       </div>
+
+      {/* ② 분류 팝업 */}
+      <ClassifyModal rec={clsRec} sched={sched} busy={clsBusy}
+        onPick={saveClassify} onClose={() => setClsRec(null)} />
     </div>
   );
 }
@@ -4836,16 +5391,37 @@ function WorkerRecord({ user, workplace, workerInfo, records, onRefresh }) {
 /* ============================================================
    근로자 — 임금 비교
 ============================================================ */
-function WorkerPay({ user, workplace, workerInfo, records, settings }) {
+function WorkerPay({ user, workplace, workerInfo, records, settings, onRefresh, openSub }) {
   const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
   const [actualInput, setActualInput] = useState('');
   const [actualSaved, setActualSaved] = useState(null);
   const [showWeeks, setShowWeeks] = useState(false);
+  const [evBusy, setEvBusy] = useState(false);          // ⑤ PDF 저장 중
+  const [clsBusy, setClsBusy] = useState(false);        // ② 일괄 분류 중
 
-  const { hourly, sojeongH, is5plus } = effectiveCond(workerInfo, settings);
+  const { hourly, sojeongH, is5plus, sched } = effectiveCond(workerInfo, settings);
   const monthRecs = records.filter(r => r.date?.startsWith(month) && r.out_time);
-  const m = calcWorkerMonth(monthRecs, hourly, sojeongH, is5plus);
+  const m = calcWorkerMonth(monthRecs, hourly, sojeongH, is5plus, sched);
   const shouldGet = m.total;
+  // ② 미분류 기록 (소정시각 밖 구간이 있고 아직 분류 전)
+  const pendRecs = sched ? monthRecs.filter(r => pendingMinOf(r, sched) > 0) : [];
+
+  /* ② 분류 저장: 미분류 구간(조기/늦은)에만 type 기록 */
+  const classify = async (recsToSet, type) => {
+    if (clsBusy) return;
+    setClsBusy(true);
+    const tbl = workplace ? 'attendance' : 'personal_records';
+    for (const r of recsToSet) {
+      const ap = applySched(r, sched, false);
+      const upd = {};
+      if (ap.pendEarly) upd.early_type = type;
+      if (ap.pendLate) upd.late_type = type;
+      if (Object.keys(upd).length)
+        await sb.from(tbl).update(upd).eq('id', r.id);
+    }
+    setClsBusy(false);
+    onRefresh && onRefresh();
+  };
 
   useEffect(() => {
     sb.from('actual_received')
@@ -4899,6 +5475,7 @@ function WorkerPay({ user, workplace, workerInfo, records, settings }) {
           <Badge color={is5plus ? 'green' : 'gray'}>
             {is5plus ? '5인 이상 · 가산 적용' : '5인 미만 · 가산 제외'}
           </Badge>
+          {sched && <Badge color="gray">약속 {sched.start}~{sched.end}</Badge>}
         </div>
 
         <Card style={{ marginBottom: 14, background: blueGrad, color: '#fff', border: 'none' }}>
@@ -4916,7 +5493,76 @@ function WorkerPay({ user, workplace, workerInfo, records, settings }) {
           <PayRow label="주휴수당" amount={m.juhyuPay}
             sub={`주 소정 15h 이상인 주 ${m.weeks.filter(w=>w.ok).length}개 · 합계 ${m.juhyuH.toFixed(1)}h (개근 전제)`} />
           <PayRow label="합계" amount={shouldGet} bold />
+          {sched && (m.pendMin > 0 || m.exclMin > 0) && (
+            <div style={{ fontSize: 10, opacity: 0.92, marginTop: 4, lineHeight: 1.7,
+              paddingTop: 6, borderTop: '1px dashed rgba(255,255,255,0.25)' }}>
+              {m.pendMin > 0 && <>△ 약속 시각 밖 <b>미분류 {fmtH(m.pendMin)}</b> — 계산 제외 중 · 전부 업무로 인정 시 <b>+{won(m.pendDelta)}원</b><br/></>}
+              {m.exclMin > 0 && <>† 자발적 대기로 분류한 {fmtH(m.exclMin)}는 계산에서 제외했어요</>}
+            </div>
+          )}
         </Card>
+
+        {/* ② 미분류 출퇴근 일괄 처리 */}
+        {sched && pendRecs.length > 0 && (
+          <Card style={{ marginBottom: 14, background: '#fffbeb', borderColor: '#fde68a' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <span style={{ fontWeight: 900, fontSize: 12, color: '#92400e' }}>
+                ⏱ 분류 안 한 출퇴근 {pendRecs.length}건
+              </span>
+              <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 900, color: '#92400e' }}>
+                △ {fmtH(m.pendMin)}
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: C.t2, lineHeight: 1.7, marginBottom: 10 }}>
+              약속 시각({sched.start}~{sched.end}) 밖에 찍힌 시간이에요.
+              <b> 업무 지시·승인이 있었다면 "포함"</b>, 그냥 일찍 오거나 남아 있던
+              시간이면 "제외"를 선택하세요. 분류 전까지는 계산에서 빠져요 (기록 자체는 그대로 보존).
+            </div>
+            {pendRecs.map(r => {
+              const p = pendingMinOf(r, sched);
+              return (
+                <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '7px 0', borderBottom: `1px dashed ${C.border}` }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 800, color: C.t1 }}>
+                      {r.date} <span style={{ color: '#b45309' }}>△{fmtH(p)}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: C.t3 }}>{r.in_time} ~ {r.out_time}</div>
+                  </div>
+                  <button disabled={clsBusy} onClick={() => classify([r], 'claimed')} style={{
+                    padding: '7px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                    background: '#dcfce7', color: '#166534', fontSize: 10.5, fontWeight: 800,
+                    fontFamily: 'inherit', flexShrink: 0 }}>포함</button>
+                  <button disabled={clsBusy} onClick={() => classify([r], 'excluded')} style={{
+                    padding: '7px 10px', borderRadius: 8, border: `1px solid ${C.border}`, cursor: 'pointer',
+                    background: '#fff', color: C.t3, fontSize: 10.5, fontWeight: 800,
+                    fontFamily: 'inherit', flexShrink: 0 }}>제외</button>
+                </div>
+              );
+            })}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+              <button disabled={clsBusy} onClick={() => {
+                if (confirm(`미분류 ${pendRecs.length}건 전부 "업무였음(포함)"으로 처리할까요?\n임금에 +${won(m.pendDelta)}원 반영됩니다.`))
+                  classify(pendRecs, 'claimed');
+              }} style={{ padding: '10px', borderRadius: 9, border: 'none', cursor: 'pointer',
+                background: 'linear-gradient(135deg,#2d8a5a,#3aab72)', color: '#fff',
+                fontSize: 11, fontWeight: 800, fontFamily: 'inherit' }}>
+                {clsBusy ? '처리 중…' : '✓ 전부 업무였음 (포함)'}
+              </button>
+              <button disabled={clsBusy} onClick={() => {
+                if (confirm(`미분류 ${pendRecs.length}건 전부 "자발적 대기(제외)"로 처리할까요?`))
+                  classify(pendRecs, 'excluded');
+              }} style={{ padding: '10px', borderRadius: 9, border: `1.5px solid ${C.border}`, cursor: 'pointer',
+                background: '#fff', color: C.t2,
+                fontSize: 11, fontWeight: 800, fontFamily: 'inherit' }}>
+                {clsBusy ? '처리 중…' : '전부 자발적 대기 (제외)'}
+              </button>
+            </div>
+            <div style={{ fontSize: 9, color: C.t3, marginTop: 8, lineHeight: 1.6 }}>
+              ※ 잘못 분류했다면 출퇴근 탭에서 해당 날짜를 눌러 다시 바꿀 수 있어요
+            </div>
+          </Card>
+        )}
 
         {/* 주별 주휴 내역 */}
         {m.weeks.length > 0 && (
@@ -5008,20 +5654,45 @@ function WorkerPay({ user, workplace, workerInfo, records, settings }) {
             A4 문서로 출력합니다. 임금체불 진정(고용노동부 노동포털·☎1350) 시
             첨부자료로 활용할 수 있어요.
           </div>
-          <Btn size="md" style={{ width: '100%', background: 'linear-gradient(135deg,#b45309,#92400e)' }}
-            onClick={() => exportEvidencePDF({
-              userName: user.user_metadata?.name || user.email || '근로자',
-              workplaceName: workplace?.name || settings?.wpName || '',
-              month, recs: monthRecs, hourly, sojeongH, is5plus,
-              calc: m, actual: actualSaved
-            })}>
-            🖨 증거자료 PDF 출력
+          <Btn size="md" disabled={evBusy}
+            style={{ width: '100%', background: evBusy ? '#c9a36a' : 'linear-gradient(135deg,#b45309,#92400e)' }}
+            onClick={async () => {
+              if (evBusy) return;
+              setEvBusy(true);
+              await exportEvidencePDF({
+                userName: user.user_metadata?.name || user.email || '근로자',
+                workplaceName: workplace?.name || settings?.wpName || '',
+                month, recs: monthRecs, hourly, sojeongH, is5plus,
+                calc: m, actual: actualSaved, sched
+              });
+              setEvBusy(false);
+            }}>
+            {evBusy ? '저장 중…' : '⬇ 증거자료 PDF 저장'}
           </Btn>
           <div style={{ fontSize: 9, color: C.t3, marginTop: 8, lineHeight: 1.6 }}>
             ※ 본 자료는 근로자 본인이 기록한 내용을 정리한 참고자료이며,
             법적 판단·체불액 확정은 관할 지방고용노동청에서 이뤄집니다.
           </div>
         </Card>
+
+        {/* ⑥ 계산 도구 */}
+        {openSub && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 800, color: C.t2, margin: '16px 0 8px' }}>🧰 계산 도구</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <Card onClick={() => openSub('sim')} style={{ padding: '13px 11px', textAlign: 'center', cursor: 'pointer' }}>
+                <div style={{ fontSize: 22 }}>🧮</div>
+                <div style={{ fontSize: 12, fontWeight: 900, color: C.blue, marginTop: 5 }}>예상 임금 계산</div>
+                <div style={{ fontSize: 9.5, color: C.t3, marginTop: 3, lineHeight: 1.5 }}>기록 없이 시급·시간만으로<br/>주급·월급 미리 계산</div>
+              </Card>
+              <Card onClick={() => openSub('retire')} style={{ padding: '13px 11px', textAlign: 'center', cursor: 'pointer' }}>
+                <div style={{ fontSize: 22 }}>🏦</div>
+                <div style={{ fontSize: 12, fontWeight: 900, color: C.blue, marginTop: 5 }}>퇴직금 계산</div>
+                <div style={{ fontSize: 9.5, color: C.t3, marginTop: 3, lineHeight: 1.5 }}>내 출퇴근 기록으로<br/>3개월 임금 자동 입력</div>
+              </Card>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -5031,14 +5702,14 @@ function WorkerPay({ user, workplace, workerInfo, records, settings }) {
    근로자 — 자가진단 (간소화)
 ============================================================ */
 function WorkerCheck({ workerInfo, records, settings }) {
-  const { hourly, sojeongH, is5plus } = effectiveCond(workerInfo, settings);
+  const { hourly, sojeongH, is5plus, sched } = effectiveCond(workerInfo, settings);
   const allRecs = records.filter(r => r.out_time);
   const [selfChecks, setSelfChecks] = useState({});
 
   // 최근 기록 기준 주휴 발생 여부 (이번 달)
   const thisMonth = new Date().toISOString().slice(0,7);
   const mCalc = calcWorkerMonth(records.filter(r => r.date?.startsWith(thisMonth) && r.out_time),
-    hourly, sojeongH, is5plus);
+    hourly, sojeongH, is5plus, sched);
   const juhyuWeeks = mCalc.weeks.filter(w => w.ok).length;
 
   const items = [
@@ -5149,19 +5820,36 @@ function WorkerMore({ user, workplace, workerInfo, settings, onSettingsChange, o
 
   // ── 근로조건 설정 (인라인 수정) ──
   const [is5plus, setIs5plus] = useState(settings ? settings.is5plus : true);
-  const [hourlyStr, setHourlyStr] = useState(withCommas(String(settings?.hourly || MIN_WAGE)));
+  const [wageType, setWageType] = useState(settings?.wageType || 'hourly');
+  const [amountStr, setAmountStr] = useState(
+    withCommas(String(settings?.wageAmount || settings?.hourly || MIN_WAGE)));
+  const [daysPerWeek, setDaysPerWeek] = useState(settings?.daysPerWeek || 5);
+  const [juhyuIncl, setJuhyuIncl] = useState(settings ? settings.weeklyIncludesJuhyu !== false : true);
   const [sojeongStr, setSojeongStr] = useState(String(settings?.sojeongH || 8));
+  const [stTime, setStTime] = useState(settings?.startTime || '');
+  const [enTime, setEnTime] = useState(settings?.endTime || '');
   const [wpName, setWpName] = useState(settings?.wpName || '');
   const [saved, setSaved] = useState(false);
 
-  const hourly = Number(onlyDigits(hourlyStr)) || 0;
-  const sojeongH = parseFloat(sojeongStr) || 0;
-  const condOk = hourly > 0 && sojeongH > 0 && sojeongH <= 12;
   const linked = !!workplace;
+  const amount = Number(onlyDigits(amountStr)) || 0;
+  const sojeongH = linked ? (Number(workerInfo?.sojeong_h) || parseFloat(sojeongStr) || 8)
+                          : (parseFloat(sojeongStr) || 0);
+  const conv = toHourlyWage({ wageType, amount, sojeongH, daysPerWeek, weeklyIncludesJuhyu: juhyuIncl });
+  const hourly = linked ? (Number(workerInfo?.hourly) || 0) : (conv ? Math.floor(conv.hourly) : 0);
+  const condOk = linked ? true : (amount > 0 && sojeongH > 0 && sojeongH <= 12 && hourly > 0);
 
   const saveCond = () => {
     if (!condOk) return;
-    const s = { done: true, is5plus: !!is5plus, hourly, sojeongH, wpName: wpName.trim() };
+    const s = {
+      done: true, is5plus: !!is5plus,
+      hourly: hourly || MIN_WAGE,
+      sojeongH: sojeongH || 8,
+      wpName: wpName.trim(),
+      wageType, wageAmount: amount || hourly || MIN_WAGE,
+      daysPerWeek, weeklyIncludesJuhyu: juhyuIncl,
+      startTime: stTime, endTime: enTime   // ② 출퇴근 판정 기준 (항상 근로자 설정)
+    };
     saveWorkerSettings(s);
     onSettingsChange(s);
     setSaved(true);
@@ -5233,22 +5921,66 @@ function WorkerMore({ user, workplace, workerInfo, settings, onSettingsChange, o
           </div>
 
           <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>
-            시급 {linked && <span style={{ fontWeight: 600, color: C.t3 }}>— 사업장 연결 중에는 사업주 등록값이 우선 적용돼요</span>}
+            임금 {linked && <span style={{ fontWeight: 600, color: C.t3 }}>— 사업장 연결 중에는 사업주 등록값(시급)이 우선 적용돼요</span>}
           </div>
-          <div style={{ position: 'relative', marginBottom: 12 }}>
-            <input value={linked ? withCommas(String(workerInfo?.hourly || hourly)) : hourlyStr}
+          {!linked && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 5, marginBottom: 8 }}>
+              {WAGE_TYPES.map(w => (
+                <button key={w.id} onClick={() => setWageType(w.id)} style={{
+                  padding: '9px 2px', borderRadius: 9, cursor: 'pointer', fontFamily: 'inherit',
+                  background: wageType === w.id ? blueGrad : '#fff',
+                  color: wageType === w.id ? '#fff' : C.t2,
+                  border: wageType === w.id ? 'none' : `1.5px solid ${C.border}`,
+                  fontSize: 11.5, fontWeight: 800
+                }}>{w.label}</button>
+              ))}
+            </div>
+          )}
+          <div style={{ position: 'relative', marginBottom: 8 }}>
+            <input value={linked ? withCommas(String(workerInfo?.hourly || hourly)) : amountStr}
               inputMode="numeric" disabled={linked}
-              onChange={e => setHourlyStr(withCommas(e.target.value))}
-              style={{ width: '100%', minHeight: 46, padding: '11px 40px 11px 12px',
+              onChange={e => setAmountStr(withCommas(e.target.value))}
+              style={{ width: '100%', minHeight: 46, padding: '11px 58px 11px 12px',
                 fontSize: 15, fontWeight: 800, color: C.t1, textAlign: 'right',
                 border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none',
                 background: linked ? '#f5f5f5' : '#fff' }} />
             <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
-              fontSize: 12, fontWeight: 800, color: C.t3 }}>원</span>
+              fontSize: 11.5, fontWeight: 800, color: C.t3 }}>
+              {linked ? '원/시간' : ((WAGE_TYPES.find(w => w.id === wageType) || {}).unit || '원')}
+            </span>
           </div>
+          {!linked && (wageType === 'weekly' || wageType === 'monthly') && (
+            <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+              {[2,3,4,5,6].map(d => (
+                <button key={d} onClick={() => setDaysPerWeek(d)} style={{
+                  flex: 1, padding: '8px 2px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                  background: daysPerWeek === d ? blueGrad : '#fff',
+                  color: daysPerWeek === d ? '#fff' : C.t2,
+                  border: daysPerWeek === d ? 'none' : `1.5px solid ${C.border}`,
+                  fontSize: 11, fontWeight: 800
+                }}>주{d}일</button>
+              ))}
+            </div>
+          )}
+          {!linked && wageType === 'weekly' && (
+            <div onClick={() => setJuhyuIncl(!juhyuIncl)} style={{
+              display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, cursor: 'pointer',
+              background: '#f7fafd', border: `1px solid ${C.border}`, borderRadius: 8, padding: '8px 10px' }}>
+              <span style={{ fontSize: 13 }}>{juhyuIncl ? '☑' : '☐'}</span>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: C.t2 }}>주급에 주휴수당 포함</span>
+            </div>
+          )}
+          {!linked && wageType !== 'hourly' && conv && (
+            <div style={{ marginBottom: 8, padding: '8px 11px', borderRadius: 9,
+              background: 'linear-gradient(135deg,#eff6ff,#e0edff)', border: '1px solid rgba(59,110,196,0.3)' }}>
+              <span style={{ fontSize: 10, color: C.t3 }}>환산 통상시급 </span>
+              <b style={{ fontSize: 13, color: hourly < MIN_WAGE ? C.red : C.blue }}>{hourly.toLocaleString()}원</b>
+              <div style={{ fontSize: 9, color: C.t3, marginTop: 2, lineHeight: 1.5 }}>{conv.formula}</div>
+            </div>
+          )}
           {!linked && hourly > 0 && hourly < MIN_WAGE && (
-            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.red, marginTop: -8, marginBottom: 10 }}>
-              ⚠️ 2026 최저임금({MIN_WAGE.toLocaleString()}원) 미달
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.red, marginTop: -2, marginBottom: 10 }}>
+              ⚠️ 환산 시급이 2026 최저임금({MIN_WAGE.toLocaleString()}원) 미달
             </div>
           )}
 
@@ -5262,6 +5994,28 @@ function WorkerMore({ user, workplace, workerInfo, settings, onSettingsChange, o
                 borderRadius: 10, outline: 'none', background: linked ? '#f5f5f5' : '#fff' }} />
             <span style={{ fontSize: 12, fontWeight: 800, color: C.t3, flexShrink: 0 }}>시간 / 일</span>
           </div>
+
+          {/* ② 약속 출퇴근 시각 — 판정 기준은 항상 근로자 본인 설정 */}
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 3 }}>약속한 출퇴근 시각 (선택)</div>
+          <div style={{ fontSize: 9.5, color: C.t3, marginBottom: 7, lineHeight: 1.5 }}>
+            입력하면 일찍 출근·늦게 퇴근한 시간의 업무 여부를 분류해 계산해요 · 비우면 찍은 시각 그대로
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+            <input type="time" value={stTime} onChange={e => setStTime(e.target.value)}
+              style={{ minHeight: 44, padding: '9px', fontSize: 14, fontWeight: 800, textAlign: 'center',
+                border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff',
+                fontFamily: 'inherit', color: C.t1, WebkitAppearance: 'none' }} />
+            <span style={{ fontSize: 12, color: C.t3, fontWeight: 800 }}>~</span>
+            <input type="time" value={enTime} onChange={e => setEnTime(e.target.value)}
+              style={{ minHeight: 44, padding: '9px', fontSize: 14, fontWeight: 800, textAlign: 'center',
+                border: `1.5px solid ${C.border}`, borderRadius: 10, outline: 'none', background: '#fff',
+                fontFamily: 'inherit', color: C.t1, WebkitAppearance: 'none' }} />
+          </div>
+          {(stTime || enTime) && !(stTime && enTime) && (
+            <div style={{ fontSize: 10, color: C.goldD, fontWeight: 700, marginTop: -6, marginBottom: 10 }}>
+              시업·종업을 모두 입력해야 판정이 켜져요
+            </div>
+          )}
 
           {!linked && (
             <Field label="일터 이름 (선택)" value={wpName} onChange={setWpName} placeholder="예: ○○카페 강남점" />
@@ -5354,13 +6108,164 @@ function WorkerMore({ user, workplace, workerInfo, settings, onSettingsChange, o
 /* ============================================================
    근로자 앱
 ============================================================ */
+/* ============================================================
+   근로자 — 예상 임금 시뮬레이터 (기록 없이 미리 계산)
+============================================================ */
+function WorkerSim({ onBack, settings, workerInfo }) {
+  const def = effectiveCond(workerInfo, settings);
+  const [hourlyStr, setHourlyStr] = useState(withCommas(String(def.hourly || MIN_WAGE)));
+  const [sojStr, setSojStr] = useState(String(def.sojeongH || 8));
+  const [daysStr, setDaysStr] = useState('5');
+  const [is5, setIs5] = useState(!!def.is5plus);
+  useBackClose(true, () => { onBack(); return false; });   // ④ 물리 뒤로가기
+
+  const rate = Number(onlyDigits(hourlyStr)) || 0;
+  const dayH = parseFloat(sojStr) || 0;
+  const days = parseFloat(daysStr) || 0;
+  const ok = rate > 0 && dayH > 0 && dayH <= 12 && days > 0 && days <= 7;
+
+  const weekH = dayH * days;
+  const juhyuH = juhyuHoursOf(weekH);
+  const dayPay = dayH * rate;
+  const weekBase = weekH * rate;
+  const juhyuPay = juhyuH * rate;
+  const weekTotal = weekBase + juhyuPay;
+  const monthTotal = Math.round(weekTotal * 4.345);
+
+  const SRow = ({ label, sub, val, bold }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+      padding: '7px 0', borderBottom: bold ? 'none' : '1px dashed rgba(255,255,255,0.25)' }}>
+      <div style={{ paddingRight: 8 }}>
+        <div style={{ fontSize: bold ? 13 : 12, fontWeight: bold ? 900 : 700 }}>{label}</div>
+        {sub && <div style={{ fontSize: 9.5, opacity: 0.78, marginTop: 2, lineHeight: 1.5 }}>{sub}</div>}
+      </div>
+      <div style={{ fontSize: bold ? 18 : 13, fontWeight: 900, flexShrink: 0 }}>{won(val)}원</div>
+    </div>
+  );
+  const IN = { width: '100%', minHeight: 46, padding: '10px 12px', fontSize: 15, fontWeight: 800,
+    color: C.t1, textAlign: 'center', border: `1.5px solid ${C.border}`, borderRadius: 10,
+    outline: 'none', background: '#fff', fontFamily: 'inherit' };
+
+  return (
+    <div style={{ background: '#f6f9fd', minHeight: '100vh', maxWidth: 520, margin: '0 auto',
+      fontFamily: "-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif" }}>
+      <SubHdr title="🧮 예상 임금 계산" back={onBack} accent="blue" lang="ko" setLang={() => {}} />
+      <div style={{ padding: '14px 16px 90px' }}>
+        <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.7, marginBottom: 12 }}>
+          출퇴근 기록 없이 <b style={{ color: C.blue }}>"이 조건이면 얼마 받을까?"</b>를 미리 계산해요.
+          알바 시작 전 비교나 조건 협의에 활용하세요.
+        </div>
+
+        <Card style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>시급</div>
+          <div style={{ position: 'relative', marginBottom: 4 }}>
+            <input value={hourlyStr} inputMode="numeric"
+              onChange={e => setHourlyStr(withCommas(e.target.value))}
+              style={{ ...IN, textAlign: 'right', paddingRight: 38 }} />
+            <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+              fontSize: 12, fontWeight: 800, color: C.t3 }}>원</span>
+          </div>
+          <button onClick={() => setHourlyStr(withCommas(String(MIN_WAGE)))} style={{
+            padding: '5px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+            background: rate === MIN_WAGE ? 'rgba(59,110,196,0.1)' : '#fff',
+            border: `1.5px solid ${rate === MIN_WAGE ? C.blue : C.border}`,
+            color: rate === MIN_WAGE ? C.blue : C.t2, fontSize: 10.5, fontWeight: 800
+          }}>2026 최저시급 {MIN_WAGE.toLocaleString()}원</button>
+          {rate > 0 && rate < MIN_WAGE && (
+            <span style={{ fontSize: 10, fontWeight: 800, color: C.red, marginLeft: 8 }}>⚠️ 최저임금 미달</span>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>1일 근로시간</div>
+              <input value={sojStr} inputMode="decimal"
+                onChange={e => setSojStr(e.target.value.replace(/[^0-9.]/g, ''))} style={IN} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: C.t2, marginBottom: 6 }}>주 근무일수</div>
+              <input value={daysStr} inputMode="decimal"
+                onChange={e => setDaysStr(e.target.value.replace(/[^0-9.]/g, ''))} style={IN} />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 7, marginTop: 12 }}>
+            {[[false, '🏪 5인 미만'], [true, '🏬 5인 이상']].map(([v, lb]) => (
+              <button key={String(v)} onClick={() => setIs5(v)} style={{
+                flex: 1, padding: '10px 6px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit',
+                background: is5 === v ? blueGrad : '#fff',
+                color: is5 === v ? '#fff' : C.t2,
+                border: is5 === v ? 'none' : `1.5px solid ${C.border}`,
+                fontSize: 12, fontWeight: 800
+              }}>{lb}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 9.5, color: C.t3, marginTop: 6, lineHeight: 1.5 }}>
+            5인 이상이면 약속 시간 초과·야간(22~06시) 근무에 +50% 가산 — 아래 계산은 약속 시간만 일한 기준이에요
+          </div>
+        </Card>
+
+        {ok && (
+          <>
+            <Card style={{ background: blueGrad, color: '#fff', border: 'none', marginBottom: 10 }}>
+              <div style={{ fontSize: 11, opacity: 0.85, marginBottom: 4 }}>
+                주 {weekH}시간 ({dayH}h × {days}일) 기준 예상액 (세전)
+              </div>
+              <SRow label="1일 임금" val={dayPay} sub={`${dayH}h × ${rate.toLocaleString()}원`} />
+              <SRow label="주급 (기본)" val={weekBase} sub={`주 ${weekH}h × ${rate.toLocaleString()}원`} />
+              <SRow label="주휴수당" val={juhyuPay}
+                sub={juhyuH > 0
+                  ? `min(${weekH}÷40×8, 8) = ${juhyuH.toFixed(1)}h × 시급 (개근 전제)`
+                  : '주 15시간 미만 — 주휴수당 미발생'} />
+              <SRow label="주급 합계" val={weekTotal} sub="기본 + 주휴" />
+              <SRow label="예상 월급" val={monthTotal} bold sub="주급 합계 × 4.345주" />
+            </Card>
+            {juhyuH === 0 && weekH > 0 && (
+              <Card style={{ background: '#fffbeb', borderColor: '#fde68a', padding: 11, marginBottom: 10 }}>
+                <div style={{ fontSize: 10.5, color: '#92400e', lineHeight: 1.7 }}>
+                  💡 주 {weekH}시간이라 주휴수당이 없어요. 주 15시간 이상이면
+                  한 주 개근 시 하루치 임금이 추가돼요 — 근무시간 협의 때 참고하세요.
+                </div>
+              </Card>
+            )}
+            <div style={{ fontSize: 9.5, color: C.t3, lineHeight: 1.8 }}>
+              ※ 연장·야간·휴일근로 가산, 결근, 4대보험·세금 공제는 반영 전 금액입니다.<br/>
+              ※ 실제로 일을 시작하면 <b>출퇴근 탭</b>에 기록하세요 — 가산수당까지 자동 계산돼요.<br/>
+              ※ 본 계산은 참고용이며 법적 판단은 관할 지방고용노동청에서 이뤄집니다.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function WorkerApp({ user }) {
   const [settings, setSettings] = useState(() => loadWorkerSettings());
   const [workplace, setWorkplace] = useState(null);
   const [workerInfo, setWorkerInfo] = useState(null);
   const [records, setRecords] = useState([]);
   const [tab, setTab] = useState('home');
+  const [sub, setSub] = useState(null);   // ⑥ retire | sim (전체화면)
   const [loading, setLoading] = useState(true);
+  useTabBack(tab, setTab);                // ④ 물리 뒤로가기: 비-home 탭 → 홈
+
+  /* ⑥ 퇴직금 계산기 프리필: 퇴직월 직전 3개 달력월의 계산 임금 */
+  const retirePrefill = (endDate, lastDayMode) => {
+    const { hourly, sojeongH, is5plus, sched } = effectiveCond(workerInfo, settings);
+    // 퇴직일 = 마지막근무일+1 → 마지막 근무월 기준으로 직전 3개월을 본다
+    const d0 = new Date(endDate + 'T12:00:00');
+    if (!lastDayMode) d0.setDate(d0.getDate() - 1);   // 퇴직일 입력이면 -1일 = 마지막 근무일
+    const months = [];
+    for (let i = 3; i >= 1; i--) {
+      const d = new Date(d0.getFullYear(), d0.getMonth() - i, 1);
+      const ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+      const recs = records.filter(r => r.date?.startsWith(ym) && r.out_time);
+      const c = calcWorkerMonth(recs, hourly, sojeongH, is5plus, sched);
+      const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      months.push({ ym, total: c.total, days: dim });
+    }
+    return { months };
+  };
 
   const loadRecords = useCallback(async (wInfo, wp) => {
     const table = wp ? 'attendance' : 'personal_records';
@@ -5419,16 +6324,25 @@ function WorkerApp({ user }) {
 
   if (loading) return <Spinner text="불러오는 중..." />;
 
+  /* ⑥ 전체화면 계산 도구 */
+  if (sub === 'retire')
+    return <RetirementScreen onBack={() => setSub(null)} lang="ko" setLang={() => {}}
+             accent="blue" prefill={retirePrefill} />;
+  if (sub === 'sim')
+    return <WorkerSim onBack={() => setSub(null)} settings={settings} workerInfo={workerInfo} />;
+
   return (
     <div>
       {tab === 'home' && <WorkerHome user={user} workplace={workplace}
                            workerInfo={workerInfo} records={records}
-                           settings={settings} setTab={setTab} />}
+                           settings={settings} setTab={setTab} openSub={setSub} />}
       {tab === 'record' && <WorkerRecord user={user} workplace={workplace}
-                              workerInfo={workerInfo} records={records}
+                              workerInfo={workerInfo} records={records} settings={settings}
                               onRefresh={() => loadRecords(workerInfo, workplace)} />}
       {tab === 'pay' && <WorkerPay user={user} workplace={workplace}
-                           workerInfo={workerInfo} records={records} settings={settings} />}
+                           workerInfo={workerInfo} records={records} settings={settings}
+                           onRefresh={() => loadRecords(workerInfo, workplace)}
+                           openSub={setSub} />}
       {tab === 'check' && <WorkerCheck workerInfo={workerInfo} records={records} settings={settings} />}
       {tab === 'more' && <WorkerMore user={user} workplace={workplace} workerInfo={workerInfo}
                             settings={settings}

@@ -163,18 +163,15 @@ input,select{font-family:inherit;-webkit-appearance:none;outline:none}
 .collapse-b{display:none;padding-top:4px}
 .collapse-b.open{display:block}
 
-/* ── 인쇄(=PDF 저장) ── */
-#print-root{display:none}
-@media print{
-  body{background:#fff}
-  body.printing .app{display:none}
-  body.printing #print-root{display:block;padding:24px;max-width:760px;margin:0 auto;color:#000;font-size:13px;line-height:2}
-  body.printing #print-root h3{font-family:'Noto Serif KR',serif;text-align:center;font-size:20px;margin-bottom:18px}
-  body.printing #print-root .pln{border-bottom:1px solid #ddd;padding:6px 0}
-  body.printing #print-root table{width:100%;border-collapse:collapse;margin-top:10px}
-  body.printing #print-root th,body.printing #print-root td{border:1px solid #bbb;padding:7px 9px;font-size:12px;text-align:left}
-  body.printing #print-root .pf{margin-top:20px;font-size:10px;color:#666;line-height:1.7}
-}
+/* ── PDF 렌더용 (화면 밖, 다운로드 캡처 전용) ── */
+#pdf-holder{position:absolute;left:-9999px;top:0;width:720px;background:#fff}
+#pdf-holder .pdoc{padding:34px 30px;color:#111;font-family:'Noto Sans KR',sans-serif;font-size:14px;line-height:2}
+#pdf-holder .pdoc h3{font-family:'Noto Serif KR',serif;text-align:center;font-size:22px;margin-bottom:20px}
+#pdf-holder .pdoc .pln{border-bottom:1px solid #e3e3e3;padding:7px 0}
+#pdf-holder .pdoc table{width:100%;border-collapse:collapse;margin-top:12px}
+#pdf-holder .pdoc th,#pdf-holder .pdoc td{border:1px solid #bbb;padding:8px 10px;font-size:12.5px;text-align:left}
+#pdf-holder .pdoc .sign{margin-top:46px;font-size:13px}
+#pdf-holder .pdoc .pf{margin-top:22px;font-size:11px;color:#555;line-height:1.7}
 </style>
 </head>
 <body>
@@ -296,7 +293,7 @@ input,select{font-family:inherit;-webkit-appearance:none;outline:none}
       <div id="recList"><div class="hint" style="margin-top:0">아직 기록이 없어요. 위 버튼을 누르는 순간부터 시작입니다 — 회원가입도, 설정도 필요 없어요.</div></div>
       <div class="hint">· 체류시간과 실근로시간을 함께 보여드려요<br>· 휴게 ‘미부여’로 기록하면 차감하지 않고 §54 위반 소지를 표시합니다</div>
     </div>
-    <button class="ghost" onclick="exportAttend()">📄 출퇴근 증거자료 PDF로 저장 (인쇄)</button>
+    <button class="ghost" onclick="exportAttend()">📄 출퇴근 증거자료 PDF로 저장</button>
   </div>
 </div>
 
@@ -373,7 +370,7 @@ input,select{font-family:inherit;-webkit-appearance:none;outline:none}
     </div>
 
     <div class="doc" id="cPrev"></div>
-    <button class="savebtn gold" onclick="exportContract()">📄 계약서 PDF로 저장 (인쇄·교부용)</button>
+    <button class="savebtn gold" onclick="exportContract()">📄 계약서 PDF로 저장 (교부용)</button>
     <div class="hint" style="text-align:center">작성·교부하지 않으면 500만원 이하 벌금 (근기법 §17·§114)</div>
   </div>
 </div>
@@ -387,15 +384,17 @@ input,select{font-family:inherit;-webkit-appearance:none;outline:none}
       <div id="psBody"></div>
       <div class="hint">· 구성항목·계산방법·공제내역이 모두 표시돼야 해요 (미교부 500만원 이하 과태료)<br>· 내 급여 확인용으로도, 직원에게 교부할 명세서로도 같은 양식을 씁니다<br>· 월급 정밀 계산에서 저장한 조건이 자동으로 채워집니다</div>
     </div>
-    <button class="savebtn gold" onclick="exportPayslip()">📄 명세서 PDF로 저장 (인쇄)</button>
+    <button class="savebtn gold" onclick="exportPayslip()">📄 명세서 PDF로 저장</button>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 </div><!-- /.app -->
 
-<div id="print-root"></div>
+<div id="pdf-holder"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 /* ============ 영속 저장 (LOCAL_MODE) ============ */
 var STORE_KEY = 'nomugiljabi.v2';
@@ -569,15 +568,22 @@ function updateRestTs(){
 function restRule(rawH){ return rawH >= 8 ? 1 : (rawH >= 4 ? 0.5 : 0); }
 
 function getLoc(cb){
-  if(!navigator.geolocation){ cb(null); return; }
+  if(window.isSecureContext === false){ cb(null, 'HTTPS가 아니어서 위치를 쓸 수 없어요'); return; }
+  if(!navigator.geolocation){ cb(null, '이 기기·브라우저가 위치를 지원하지 않아요'); return; }
   var done = false;
-  var timer = setTimeout(function(){ if(!done){ done = true; cb(null); } }, 6000);
+  var timer = setTimeout(function(){ if(!done){ done = true; cb(null, '위치 확인 시간 초과'); } }, 9000);
   navigator.geolocation.getCurrentPosition(
-    function(p){ if(done) return; done = true; clearTimeout(timer); cb({lat:p.coords.latitude, lng:p.coords.longitude}); },
-    function(){ if(done) return; done = true; clearTimeout(timer); cb(null); },
-    { enableHighAccuracy:true, timeout:5500, maximumAge:0 }
+    function(p){ if(done) return; done = true; clearTimeout(timer);
+      cb({ lat:p.coords.latitude, lng:p.coords.longitude, acc:p.coords.accuracy }); },
+    function(err){ if(done) return; done = true; clearTimeout(timer);
+      var m = err.code === 1 ? '위치 권한이 거부됐어요 (설정에서 허용 필요)'
+            : err.code === 2 ? '위치를 가져올 수 없어요 (신호 없음)'
+            : '위치 확인 시간 초과';
+      cb(null, m); },
+    { enableHighAccuracy:true, timeout:8000, maximumAge:15000 }
   );
 }
+function coordStr(lat, lng){ return '📍 ' + lat.toFixed(5) + ', ' + lng.toFixed(5); }
 function setGpsUI(ok, msg){
   document.getElementById('gpsDot').classList.toggle('off', !ok);
   document.getElementById('gpsTxt').textContent = msg;
@@ -588,20 +594,20 @@ function punch(){
   btn.disabled = true;
   if(!state.punchIn){
     setGpsUI(true, '위치 확인 중…');
-    getLoc(function(loc){
+    getLoc(function(loc, reason){
       var now = new Date();
       state.punchIn = { iso: now.toISOString(), lat: loc ? loc.lat : null, lng: loc ? loc.lng : null };
       save();
       btn.classList.remove('in'); btn.classList.add('out');
       document.getElementById('punchT').textContent = '퇴근';
       document.getElementById('punchS').textContent = pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + ' 출근 기록됨';
-      setGpsUI(!!loc, loc ? 'GPS 좌표 저장됨 — 퇴근도 눌러주세요' : '위치 권한이 없어 시각만 기록돼요');
-      toast(loc ? '출근 기록 완료 (시각 + GPS)' : '출근 기록 완료 (시각만 · 위치 권한 없음)');
+      setGpsUI(!!loc, loc ? coordStr(loc.lat, loc.lng) + ' 저장됨' : (reason || '시각만 기록됨'));
+      toast(loc ? '출근 기록 완료 (시각 + GPS)' : '출근 기록 — ' + (reason || '시각만'));
       btn.disabled = false;
     });
   } else {
     setGpsUI(true, '위치 확인 중…');
-    getLoc(function(loc){
+    getLoc(function(loc, reason){
       var out = new Date();
       var inDate = new Date(state.punchIn.iso);
       var rawH = Math.max((out - inDate) / 3600000, 0);
@@ -618,7 +624,7 @@ function punch(){
       btn.classList.remove('out'); btn.classList.add('in');
       document.getElementById('punchT').textContent = '출근';
       document.getElementById('punchS').textContent = '누르면 시각·GPS가 기록돼요';
-      setGpsUI(false, '위치 권한을 허용하면 GPS 좌표가 증거로 함께 저장됩니다');
+      setGpsUI(!!loc, loc ? coordStr(loc.lat, loc.lng) + ' (퇴근) 저장됨' : (reason || '퇴근 위치 미기록'));
       if(!state.attendWage && !state.wage) document.getElementById('wagePrompt').style.display = 'block';
       renderRecords();
       toast('퇴근 완료 — 체류 ' + rawH.toFixed(1) + 'h · 실근로 ' + work.toFixed(1) + 'h');
@@ -657,11 +663,13 @@ function renderRecords(){
   var html = '';
   state.records.forEach(function(r){
     var d = new Date(r.out);
-    var noRest = (!r.restGiven && r.raw >= 4);
+    var gps = (r.inLat != null) ? '<span class="rh"><br>📍 ' + r.inLat.toFixed(5) + ', ' + r.inLng.toFixed(5) + '</span>'
+                                : '<span class="rh"><br>위치 미기록</span>';
     html += '<div class="rec-item">'
       + '<span class="rdate">' + (d.getMonth()+1) + '/' + d.getDate() + '</span>'
       + '<span class="rtime">체류 ' + r.raw.toFixed(1) + 'h · 실근로 ' + r.work.toFixed(1) + 'h'
-        + '<span class="rh"> ' + (r.restGiven ? '(휴게 ' + Math.round(r.rest*60) + '분 차감)' : '<span class="rno">(휴게 미부여 · §54 점검)</span>') + '</span></span>'
+        + '<span class="rh"> ' + (r.restGiven ? '(휴게 ' + Math.round(r.rest*60) + '분 차감)' : '<span class="rno">(휴게 미부여 · §54 점검)</span>') + '</span>'
+        + gps + '</span>'
       + (w ? '<span class="rpay">' + fmt(r.work * w) + '원</span>' : '<span class="rpay" style="color:var(--t3);font-weight:600">시급 입력 시</span>')
       + '</div>';
   });
@@ -859,13 +867,45 @@ function clearAll(){
   toast('모두 지웠어요');
 }
 
-/* ============ PDF (인쇄) ============ */
-function printDoc(innerHtml){
-  document.getElementById('print-root').innerHTML = innerHtml;
-  document.body.classList.add('printing');
-  function after(){ document.body.classList.remove('printing'); window.removeEventListener('afterprint', after); }
-  window.addEventListener('afterprint', after);
-  setTimeout(function(){ window.print(); }, 60);
+/* ============ PDF 다운로드 (html2canvas + jsPDF) ============ */
+function libsReady(){ return (typeof html2canvas !== 'undefined') && window.jspdf && window.jspdf.jsPDF; }
+function stamp(){ var n = new Date(); return '' + n.getFullYear() + pad2(n.getMonth()+1) + pad2(n.getDate()); }
+function makePdf(filename, innerHtml){
+  if(!libsReady()){ toast('PDF 모듈을 못 불러왔어요. 네트워크 확인 후 다시 시도해 주세요'); return; }
+  toast('PDF 만드는 중…');
+  var holder = document.getElementById('pdf-holder');
+  holder.innerHTML = '<div class="pdoc">' + innerHtml + '</div>';
+  var target = holder.firstChild;
+  html2canvas(target, { scale:2, backgroundColor:'#ffffff', useCORS:true }).then(function(canvas){
+    try{
+      var jsPDF = window.jspdf.jsPDF;
+      var pdf = new jsPDF('p','mm','a4');
+      var margin = 10;
+      var iw = pdf.internal.pageSize.getWidth() - margin*2;
+      var ph = pdf.internal.pageSize.getHeight();
+      var fullH = canvas.height * iw / canvas.width;
+      if(fullH <= ph - margin*2){
+        pdf.addImage(canvas.toDataURL('image/png'), 'PNG', margin, margin, iw, fullH);
+      } else {
+        var pagePx = Math.floor(canvas.width * (ph - margin*2) / iw);
+        var y = 0, first = true;
+        while(y < canvas.height){
+          var hPx = Math.min(pagePx, canvas.height - y);
+          var slice = document.createElement('canvas');
+          slice.width = canvas.width; slice.height = hPx;
+          var ctx = slice.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0,0,slice.width,slice.height);
+          ctx.drawImage(canvas, 0, y, canvas.width, hPx, 0, 0, canvas.width, hPx);
+          if(!first) pdf.addPage();
+          pdf.addImage(slice.toDataURL('image/png'), 'PNG', margin, margin, iw, hPx * iw / canvas.width);
+          y += hPx; first = false;
+        }
+      }
+      pdf.save(filename);
+      toast('PDF 저장 완료');
+    }catch(e){ toast('PDF 생성 실패: ' + (e && e.message || e)); }
+    holder.innerHTML = '';
+  }).catch(function(e){ toast('PDF 생성 실패: ' + (e && e.message || e)); holder.innerHTML = ''; });
 }
 function gpsStr(lat, lng){ return (lat != null && lng != null) ? (lat.toFixed(5) + ', ' + lng.toFixed(5)) : '미기록'; }
 function exportAttend(){
@@ -880,21 +920,21 @@ function exportAttend(){
       + '<td>' + (w ? fmt(r.work*w)+'원' : '-') + '</td>'
       + '<td style="font-size:10px">' + gpsStr(r.inLat, r.inLng) + '</td></tr>';
   }).join('');
-  printDoc('<h3>출퇴근 기록 증거자료</h3>'
+  makePdf('출퇴근증거_'+stamp()+'.pdf', '<h3>출퇴근 기록 증거자료</h3>'
     + '<div class="pln">작성일: ' + new Date().toLocaleDateString('ko-KR') + ' · 적용 시급: ' + (w ? fmt(w)+'원' : '미입력') + '</div>'
     + '<table><tr><th>날짜</th><th>출~퇴근</th><th>체류</th><th>실근로</th><th>휴게</th><th>일당</th><th>출근 GPS</th></tr>' + rows + '</table>'
     + '<div class="pf">· 실근로시간은 체류시간에서 휴게시간을 제외한 값입니다(근기법 §54).<br>· 본 자료는 근로자 본인이 기록한 참고자료로, 법적 효력은 노동위원회·법원의 판단에 따릅니다.</div>');
 }
 function exportContract(){
   var c = contractData();
-  printDoc('<h3>표준근로계약서</h3>'
+  makePdf('근로계약서_'+stamp()+'.pdf', '<h3>표준근로계약서</h3>'
     + '<div class="pln"><b>' + c.biz + '</b>(사업주)와(과) <b>' + c.name + '</b>(근로자)는 다음과 같이 근로계약을 체결한다.</div>'
     + '<div class="pln">1. 근무일: ' + c.days + ' / 시업 ' + c.s + ' ~ 종업 ' + c.e + '</div>'
     + '<div class="pln">2. 휴게시간: ' + c.rest + '분 (근로 도중 부여, 근기법 §54) — 1일 실근로 ' + c.workH.toFixed(1) + '시간</div>'
     + '<div class="pln">3. 임금: 시급 ' + fmt(c.w) + '원, 주휴수당 별도 산정 (근기법 §55)</div>'
     + '<div class="pln">4. 임금 지급: 매월 1회 이상 일정일에 통화로 직접 전액 지급 (근기법 §43)</div>'
     + '<div class="pln">5. 기타 이 계약에 정함이 없는 사항은 근로기준법에 따른다.</div>'
-    + '<div style="margin-top:40px">사업주 (서명) ________________&nbsp;&nbsp;&nbsp;근로자 (서명) ________________</div>'
+    + '<div class="sign">사업주 (서명) ________________&nbsp;&nbsp;&nbsp;근로자 (서명) ________________</div>'
     + '<div class="pf">· 본 계약서는 2부 작성해 사업주·근로자가 각 1부 보관·교부합니다 (근기법 §17).</div>');
 }
 function exportPayslip(){
@@ -905,7 +945,7 @@ function exportPayslip(){
   if(c.ot > 0){ rows += '<tr><td>연장 기본분</td><td>주 ' + c.ot.toFixed(1) + 'h</td><td>' + fmt(m.otBase) + '원</td></tr>';
     if(c.is5) rows += '<tr><td>연장 가산 50%</td><td>근기법 §56</td><td>' + fmt(m.otPrem) + '원</td></tr>'; }
   if(m.ntPrem > 0) rows += '<tr><td>야간 가산 50%</td><td>주 ' + c.nt + 'h</td><td>' + fmt(m.ntPrem) + '원</td></tr>';
-  printDoc('<h3>임금명세서</h3>'
+  makePdf('임금명세서_'+stamp()+'.pdf', '<h3>임금명세서</h3>'
     + '<div class="pln">작성일: ' + new Date().toLocaleDateString('ko-KR') + ' (근기법 §48② 양식)</div>'
     + '<table><tr><th>항목</th><th>계산방법</th><th>금액</th></tr>' + rows
     + '<tr><td><b>지급 합계(세전)</b></td><td></td><td><b>' + fmt(m.total) + '원</b></td></tr></table>'
